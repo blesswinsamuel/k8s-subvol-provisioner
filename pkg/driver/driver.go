@@ -17,14 +17,15 @@ type VolumeInfo struct {
 
 // CreateOptions specifies the input parameters for volume creation.
 type CreateOptions struct {
-	Name        string
-	MountPath   string
-	HostPrefix  string
-	QuotaBytes  int64
-	Owner       *config.Ownership
-	Mode        *os.FileMode
-	Properties  map[string]string
-	Encryption  *config.EncryptionConfig
+	AdoptExisting bool
+	Name          string
+	MountPath     string
+	HostPrefix    string
+	QuotaBytes    int64
+	Owner         *config.Ownership
+	Mode          *os.FileMode
+	Properties    map[string]string
+	Encryption    *config.EncryptionConfig
 }
 
 // DeleteOptions specifies the input parameters for volume destruction.

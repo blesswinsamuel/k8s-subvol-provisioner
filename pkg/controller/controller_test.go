@@ -2,6 +2,7 @@ package controller
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/apis/config"
@@ -14,6 +15,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/client-go/tools/record"
 )
 
 func TestControllerProvisioning(t *testing.T) {
@@ -201,4 +203,166 @@ func TestControllerDeleteReleasedPV(t *testing.T) {
 	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
 	require.NoError(t, err)
 	assert.Empty(t, pvs.Items)
+}
+
+func TestControllerAdoptExisting(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	// Pre-create the dataset the PVC will adopt (simulating a migrated static local PV).
+	_, err := mockDriver.Create(ctx, driver.CreateOptions{
+		Name:      "pool/k8s/media/media-claim",
+		MountPath: "/mnt/pool/k8s/media/media-claim",
+	})
+	require.NoError(t, err)
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "zfs-mock",
+		},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver:       "mock",
+			config.ParamParent:       "pool/k8s",
+			config.ParamMountPrefix:  "/mnt/pool/k8s",
+			config.ParamPathTemplate: "{{ .Namespace }}/{{ .PVC }}",
+			config.ParamNode:         "nas-pc",
+		},
+	}
+
+	scName := "zfs-mock"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "media-claim",
+			Namespace: "media",
+			UID:       "444-555-666",
+			Annotations: map[string]string{
+				config.AnnAdoptExisting: "true",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("100Gi"),
+				},
+			},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc)
+	recorder := record.NewFakeRecorder(10)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+		Recorder: recorder,
+	})
+	require.NoError(t, err)
+
+	ctrl.reconcileClaims(ctx)
+
+	// The PV should be built against the existing dataset.
+	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pvs.Items, 1)
+	assert.Equal(t, "pvc-444-555-666", pvs.Items[0].Name)
+	assert.Equal(t, "/mnt/pool/k8s/media/media-claim", pvs.Items[0].Spec.Local.Path)
+
+	// Adoption must not have re-created or mutated the mock volume: the recorded
+	// CreateOptions are still the original ones from pre-seeding.
+	origOpts, ok := mockDriver.GetCreateOptions("pool/k8s/media/media-claim")
+	require.True(t, ok)
+	assert.False(t, origOpts.AdoptExisting, "original create options must be untouched")
+
+	// A Normal VolumeAdopted event must have been emitted.
+	select {
+	case event := <-recorder.Events:
+		assert.Contains(t, event, "VolumeAdopted")
+	default:
+		t.Error("expected a VolumeAdopted event to be emitted")
+	}
+}
+
+func TestControllerExistingNoAdopt(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	// Pre-create the dataset; PVC lacks the adopt annotation.
+	_, err := mockDriver.Create(ctx, driver.CreateOptions{
+		Name:      "pool/k8s/media/media-claim",
+		MountPath: "/mnt/pool/k8s/media/media-claim",
+	})
+	require.NoError(t, err)
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "zfs-mock",
+		},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver:       "mock",
+			config.ParamParent:       "pool/k8s",
+			config.ParamMountPrefix:  "/mnt/pool/k8s",
+			config.ParamPathTemplate: "{{ .Namespace }}/{{ .PVC }}",
+			config.ParamNode:         "nas-pc",
+		},
+	}
+
+	scName := "zfs-mock"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "media-claim",
+			Namespace: "media",
+			UID:       "777-888-999",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc)
+	recorder := record.NewFakeRecorder(10)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+		Recorder: recorder,
+	})
+	require.NoError(t, err)
+
+	ctrl.reconcileClaims(ctx)
+
+	// Without the annotation, an existing dataset must fail exactly as before:
+	// no PV created, ProvisioningFailed warning emitted.
+	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, pvs.Items)
+
+	foundFailure := false
+	for {
+		select {
+		case event := <-recorder.Events:
+			if strings.Contains(event, "ProvisioningFailed") {
+				foundFailure = true
+			}
+		default:
+			assert.True(t, foundFailure, "expected a ProvisioningFailed event")
+			return
+		}
+	}
 }

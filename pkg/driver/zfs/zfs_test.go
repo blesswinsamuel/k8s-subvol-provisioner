@@ -13,8 +13,8 @@ import (
 )
 
 type recordExecutor struct {
-	commands [][]string
-	stdins   [][]byte
+	commands  [][]string
+	stdins    [][]byte
 	responses map[string][]byte
 	errors    map[string]error
 }
@@ -123,4 +123,57 @@ func TestZFSDeleteWithSnapshot(t *testing.T) {
 	}
 	assert.True(t, foundSnapshot, "expected snapshot command")
 	assert.True(t, foundDestroy, "expected destroy command")
+}
+
+func TestZFSCreateAdoptExisting(t *testing.T) {
+	exec := newRecordExecutor()
+	// zfs list succeeds: dataset already exists
+	exec.responses["zfs list -H -o name tank/k8s/existing-pvc"] = []byte("tank/k8s/existing-pvc\n")
+	exec.responses["zfs get -H -o value mountpoint tank/k8s/existing-pvc"] = []byte("/tank/k8s/existing-pvc\n")
+
+	d := New(WithExecutor(exec))
+	info, err := d.Create(context.Background(), driver.CreateOptions{
+		Name:          "tank/k8s/existing-pvc",
+		QuotaBytes:    10 * 1024 * 1024 * 1024,
+		Properties:    map[string]string{"compression": "zstd"},
+		AdoptExisting: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, "tank/k8s/existing-pvc", info.Name)
+	assert.Equal(t, "/tank/k8s/existing-pvc", info.MountPath)
+
+	// Adoption must not mutate: no create, no set, no promote/inherit commands.
+	for _, cmd := range exec.commands {
+		if len(cmd) >= 2 && cmd[1] == "create" {
+			t.Errorf("unexpected zfs create during adoption: %v", cmd)
+		}
+		if len(cmd) >= 2 && cmd[1] == "set" {
+			t.Errorf("unexpected zfs set during adoption: %v", cmd)
+		}
+	}
+	// Mountpoint is queried the same way the create path does.
+	assert.Contains(t, exec.commands, []string{"zfs", "get", "-H", "-o", "value", "mountpoint", "tank/k8s/existing-pvc"})
+}
+
+func TestZFSCreateExistingNoAdopt(t *testing.T) {
+	exec := newRecordExecutor()
+	// zfs list succeeds: dataset already exists, adopt annotation absent.
+	exec.responses["zfs list -H -o name tank/k8s/existing-pvc"] = []byte("tank/k8s/existing-pvc\n")
+
+	d := New(WithExecutor(exec))
+	info, err := d.Create(context.Background(), driver.CreateOptions{
+		Name: "tank/k8s/existing-pvc",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), `dataset "tank/k8s/existing-pvc" already exists`)
+
+	for _, cmd := range exec.commands {
+		if len(cmd) >= 2 && cmd[1] == "create" {
+			t.Errorf("unexpected zfs create: %v", cmd)
+		}
+	}
 }

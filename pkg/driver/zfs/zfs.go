@@ -92,7 +92,23 @@ func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 		return nil, fmt.Errorf("failed to check if dataset %q exists: %w", opts.Name, err)
 	}
 	if exists {
-		return nil, fmt.Errorf("dataset %q already exists", opts.Name)
+		if !opts.AdoptExisting {
+			return nil, fmt.Errorf("dataset %q already exists", opts.Name)
+		}
+		// Adopt the existing dataset as-is: no create, no property/quota/ownership mutations.
+		mountPath := opts.MountPath
+		if mountPath == "" {
+			out, err := d.executor.Run(ctx, nil, d.zfsPath, "get", "-H", "-o", "value", "mountpoint", opts.Name)
+			if err == nil {
+				mountPath = strings.TrimSpace(string(out))
+			}
+		}
+		log.Info().Str("dataset", opts.Name).Str("mountPath", mountPath).Msg("Adopting existing ZFS dataset")
+		return &driver.VolumeInfo{
+			VolumeID:  fmt.Sprintf("zfs:%s", opts.Name),
+			Name:      opts.Name,
+			MountPath: mountPath,
+		}, nil
 	}
 
 	args := []string{"create", "-p"}

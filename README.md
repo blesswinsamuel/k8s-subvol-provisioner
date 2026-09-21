@@ -68,6 +68,7 @@ When a `PersistentVolumeClaim` is submitted:
 | `subvol.io/key-location` | HTTP/HTTPS or local key location for ZFS encryption. |
 | `subvol.io/secret-key-ref` | Reference to a Kubernetes secret containing the key (`namespace/secret#key`). |
 | `subvol.io/snapshot-before-delete` | When set to `"true"` and reclaim policy is `Delete`, creates a pre-deletion snapshot before destroying. |
+| `subvol.io/adopt-existing` | When set to `"true"`, adopts an already-existing dataset/subvolume as-is (no create, quota, ownership, or property mutations) and binds a new PV to it. Without this annotation, an existing dataset is an error. |
 
 ---
 

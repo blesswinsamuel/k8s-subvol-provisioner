@@ -266,15 +266,18 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		encConfig.KeyData = keyData
 	}
 
+	adoptExisting := pvc.Annotations[config.AnnAdoptExisting] == "true"
+
 	createOpts := driver.CreateOptions{
-		Name:        datasetName,
-		MountPath:   mountPath,
-		HostPrefix:  c.hostPrefix,
-		QuotaBytes:  quotaBytes,
-		Owner:       owner,
-		Mode:        mode,
-		Properties:  properties,
-		Encryption:  encConfig,
+		AdoptExisting: adoptExisting,
+		Name:          datasetName,
+		MountPath:     mountPath,
+		HostPrefix:    c.hostPrefix,
+		QuotaBytes:    quotaBytes,
+		Owner:         owner,
+		Mode:          mode,
+		Properties:    properties,
+		Encryption:    encConfig,
 	}
 
 	log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("mountPath", mountPath).Msg("Provisioning volume")
@@ -283,6 +286,11 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to provision volume")
 		c.emitEvent(pvc, corev1.EventTypeWarning, "ProvisioningFailed", err.Error())
 		return
+	}
+
+	if adoptExisting {
+		log.Info().Str("pvc", pvc.Name).Str("dataset", volInfo.Name).Msg("Adopted existing dataset")
+		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeAdopted", fmt.Sprintf("Adopted existing dataset %q without modification", volInfo.Name))
 	}
 
 	if volInfo.MountPath != "" {

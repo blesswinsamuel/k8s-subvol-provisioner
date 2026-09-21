@@ -37,8 +37,11 @@ func (m *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 	if opts.Name == "" {
 		return nil, fmt.Errorf("volume name cannot be empty")
 	}
-	if _, exists := m.volumes[opts.Name]; exists {
-		return nil, fmt.Errorf("volume %q already exists", opts.Name)
+	if info, exists := m.volumes[opts.Name]; exists {
+		if !opts.AdoptExisting {
+			return nil, fmt.Errorf("volume %q already exists", opts.Name)
+		}
+		return info, nil
 	}
 
 	info := &driver.VolumeInfo{

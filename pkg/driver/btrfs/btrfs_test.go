@@ -12,8 +12,8 @@ import (
 )
 
 type recordExecutor struct {
-	commands [][]string
-	stdins   [][]byte
+	commands  [][]string
+	stdins    [][]byte
 	responses map[string][]byte
 	errors    map[string]error
 }
@@ -85,4 +85,54 @@ func TestBtrfsDeleteWithSnapshot(t *testing.T) {
 	}
 	assert.True(t, foundSnapshot, "expected snapshot command")
 	assert.True(t, foundDelete, "expected delete command")
+}
+
+func TestBtrfsCreateAdoptExisting(t *testing.T) {
+	exec := newRecordExecutor()
+	// btrfs subvolume show succeeds: subvolume already exists
+	exec.responses["btrfs subvolume show /mnt/btrfs/existing-sub"] = []byte("subvolume details")
+
+	d := New(WithExecutor(exec))
+	info, err := d.Create(context.Background(), driver.CreateOptions{
+		Name:          "existing-sub",
+		MountPath:     "/mnt/btrfs/existing-sub",
+		QuotaBytes:    5 * 1024 * 1024 * 1024,
+		AdoptExisting: true,
+	})
+
+	require.NoError(t, err)
+	require.NotNil(t, info)
+	assert.Equal(t, "existing-sub", info.Name)
+	assert.Equal(t, "/mnt/btrfs/existing-sub", info.MountPath)
+
+	// Adoption must not mutate: no create, no qgroup limit, no property changes.
+	for _, cmd := range exec.commands {
+		if len(cmd) >= 2 && cmd[1] == "subvolume" && cmd[2] == "create" {
+			t.Errorf("unexpected btrfs subvolume create during adoption: %v", cmd)
+		}
+		if len(cmd) >= 2 && cmd[1] == "qgroup" {
+			t.Errorf("unexpected btrfs qgroup mutation during adoption: %v", cmd)
+		}
+	}
+}
+
+func TestBtrfsCreateExistingNoAdopt(t *testing.T) {
+	exec := newRecordExecutor()
+	exec.responses["btrfs subvolume show /mnt/btrfs/existing-sub"] = []byte("subvolume details")
+
+	d := New(WithExecutor(exec))
+	info, err := d.Create(context.Background(), driver.CreateOptions{
+		Name:      "existing-sub",
+		MountPath: "/mnt/btrfs/existing-sub",
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), `btrfs subvolume "/mnt/btrfs/existing-sub" already exists`)
+
+	for _, cmd := range exec.commands {
+		if len(cmd) >= 3 && cmd[1] == "subvolume" && cmd[2] == "create" {
+			t.Errorf("unexpected btrfs subvolume create: %v", cmd)
+		}
+	}
 }

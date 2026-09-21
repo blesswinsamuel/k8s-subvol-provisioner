@@ -95,7 +95,15 @@ func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 		return nil, fmt.Errorf("failed to check if btrfs subvolume %q exists: %w", targetPath, err)
 	}
 	if exists {
-		return nil, fmt.Errorf("btrfs subvolume %q already exists", targetPath)
+		if !opts.AdoptExisting {
+			return nil, fmt.Errorf("btrfs subvolume %q already exists", targetPath)
+		}
+		log.Info().Str("path", targetPath).Msg("Adopting existing Btrfs subvolume")
+		return &driver.VolumeInfo{
+			VolumeID:  fmt.Sprintf("btrfs:%s", opts.Name),
+			Name:      opts.Name,
+			MountPath: targetPath,
+		}, nil
 	}
 
 	log.Info().Str("path", targetPath).Msg("Creating Btrfs subvolume")
