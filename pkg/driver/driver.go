@@ -36,6 +36,33 @@ type DeleteOptions struct {
 	SnapshotBeforeDelete bool
 }
 
+// OwnerModeOptions specifies ownership/mode reconciliation for an existing volume.
+type OwnerModeOptions struct {
+	Name       string
+	MountPath  string
+	HostPrefix string
+	Owner      *config.Ownership
+	Mode       *os.FileMode
+	DryRun     bool
+}
+
+// Reconciler is an optional interface for drivers that support reconciling
+// live state (quota, ownership, properties) onto existing volumes. Drivers
+// that do not implement it are skipped by the controller's reconcile pass.
+// Each method returns a human-readable list of changes applied (or, in
+// dry-run mode, planned but not applied).
+type Reconciler interface {
+	// ReconcileQuota sets the volume quota to quotaBytes, or removes it
+	// (quota=none) when quotaBytes is nil. No-op when already matching.
+	ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error)
+	// ReconcileOwnerMode applies ownership and/or mode to the volume mountpoint.
+	ReconcileOwnerMode(ctx context.Context, opts OwnerModeOptions) ([]string, error)
+	// ReconcileProperties sets properties to the desired values and removes
+	// (via inherit) locally-set properties no longer present. No-op when
+	// everything already matches.
+	ReconcileProperties(ctx context.Context, name string, props map[string]string, dryRun bool) ([]string, error)
+}
+
 // Driver is the pluggable filesystem interface implemented by ZFS, Btrfs, etc.
 type Driver interface {
 	Name() string

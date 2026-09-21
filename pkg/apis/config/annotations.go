@@ -13,8 +13,11 @@ const (
 	AnnMode                 = "subvol.io/mode"                   // Directory permissions e.g. "0750"
 	AnnKeyLocation          = "subvol.io/key-location"           // Encryption key location override (e.g. "http://vault:8200/..." or "file:///...")
 	AnnSecretKeyRef         = "subvol.io/secret-key-ref"         // Reference to K8s secret containing key: "namespace/name#key"
-	AnnSnapshotBeforeDelete = "subvol.io/snapshot-before-delete" // "true" to create a snapshot before deletion
+	AnnSnapshotBeforeDelete = "subvol.io/snapshot-before-delete" // "true" to preserve the volume before deletion (rename or snapshot depending on backend)
 	AnnAdoptExisting        = "subvol.io/adopt-existing"         // "true" to adopt an already-existing dataset without mutation
+	AnnQuota                = "subvol.io/quota"                  // Live quota override, e.g. "10Gi" or "none"; overrides requests.storage unless it is the dummy value 1
+	AnnProperties           = "subvol.io/properties"             // Live filesystem property overrides (multi-line key=val), overlaid on top of StorageClass properties
+	AnnDryRun               = "subvol.io/dry-run"                // "true" to compute the planned changes for this volume without applying them
 	AnnSelectedNode         = "volume.kubernetes.io/selected-node"
 
 	// PV Annotations / Labels added by provisioner

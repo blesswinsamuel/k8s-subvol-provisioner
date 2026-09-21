@@ -15,6 +15,16 @@ type Driver struct {
 	volumes map[string]*driver.VolumeInfo
 	options map[string]driver.CreateOptions
 	deleted map[string]driver.DeleteOptions
+	reconciles []ReconcileCall
+}
+
+// ReconcileCall records a single reconcile invocation.
+type ReconcileCall struct {
+	Name   string
+	Quota  *int64
+	Props  map[string]string
+	Owner  *driver.OwnerModeOptions
+	DryRun bool
 }
 
 // New creates a new in-memory mock driver.
@@ -104,4 +114,43 @@ func (m *Driver) GetCreateOptions(name string) (driver.CreateOptions, bool) {
 	defer m.mu.RUnlock()
 	opt, ok := m.options[name]
 	return opt, ok
+}
+
+func (m *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconciles = append(m.reconciles, ReconcileCall{Name: name, Quota: quotaBytes, DryRun: dryRun})
+	if quotaBytes == nil {
+		return []string{"quota=none"}, nil
+	}
+	return []string{fmt.Sprintf("quota=%d", *quotaBytes)}, nil
+}
+
+func (m *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOptions) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconciles = append(m.reconciles, ReconcileCall{Name: opts.Name, Owner: &opts, DryRun: opts.DryRun})
+	if opts.Owner == nil && opts.Mode == nil {
+		return nil, nil
+	}
+	return []string{"owner/mode"}, nil
+}
+
+func (m *Driver) ReconcileProperties(ctx context.Context, name string, props map[string]string, dryRun bool) ([]string, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.reconciles = append(m.reconciles, ReconcileCall{Name: name, Props: props, DryRun: dryRun})
+	if len(props) == 0 {
+		return nil, nil
+	}
+	return []string{fmt.Sprintf("%d properties", len(props))}, nil
+}
+
+// GetReconcileCalls returns all recorded reconcile invocations.
+func (m *Driver) GetReconcileCalls() []ReconcileCall {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	out := make([]ReconcileCall, len(m.reconciles))
+	copy(out, m.reconciles)
+	return out
 }

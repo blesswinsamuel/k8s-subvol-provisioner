@@ -3,6 +3,8 @@ package zfs
 import (
 	"context"
 	"fmt"
+	"io/fs"
+	"os"
 	"strings"
 	"testing"
 
@@ -111,18 +113,58 @@ func TestZFSDeleteWithSnapshot(t *testing.T) {
 
 	require.NoError(t, err)
 
-	// Verify snapshot command and destroy command were recorded
-	var foundSnapshot, foundDestroy bool
+	// Verify rename-to-quarantine was recorded and no destroy ran
+	var foundRename, foundDestroy bool
 	for _, cmd := range exec.commands {
-		if len(cmd) >= 2 && cmd[1] == "snapshot" && strings.HasPrefix(cmd[2], "tank/k8s/old-pvc@deleted-") {
-			foundSnapshot = true
+		if len(cmd) >= 2 && cmd[1] == "rename" && cmd[2] == "tank/k8s/old-pvc" && strings.HasPrefix(cmd[3], "tank/k8s/old-pvc-deleted-") {
+			foundRename = true
+		}
+		if len(cmd) >= 2 && cmd[1] == "destroy" {
+			foundDestroy = true
+		}
+	}
+	assert.True(t, foundRename, "expected rename to quarantine dataset")
+	assert.False(t, foundDestroy, "quarantined dataset must not be destroyed")
+}
+
+// renameFailingExecutor forces the quarantine rename to fail so the
+// destroy fallback path can be exercised.
+type renameFailingExecutor struct {
+	recordExecutor
+}
+
+func (r *renameFailingExecutor) Run(ctx context.Context, stdin []byte, cmd string, args ...string) ([]byte, error) {
+	out, err := r.recordExecutor.Run(ctx, stdin, cmd, args...)
+	if len(args) > 0 && args[0] == "rename" {
+		return out, fmt.Errorf("rename failed")
+	}
+	return out, err
+}
+
+func TestZFSDeleteSnapshotRenameFailsDestroys(t *testing.T) {
+	exec := &renameFailingExecutor{recordExecutor: *newRecordExecutor()}
+	// zfs list succeeds (dataset exists)
+	exec.responses["zfs list -H -o name tank/k8s/old-pvc"] = []byte("tank/k8s/old-pvc\n")
+
+	d := New(WithExecutor(exec))
+	err := d.Delete(context.Background(), driver.DeleteOptions{
+		Name:                 "tank/k8s/old-pvc",
+		SnapshotBeforeDelete: true,
+	})
+
+	require.NoError(t, err)
+
+	var foundRename, foundDestroy bool
+	for _, cmd := range exec.commands {
+		if len(cmd) >= 2 && cmd[1] == "rename" {
+			foundRename = true
 		}
 		if len(cmd) >= 4 && cmd[1] == "destroy" && cmd[2] == "-r" && cmd[3] == "tank/k8s/old-pvc" {
 			foundDestroy = true
 		}
 	}
-	assert.True(t, foundSnapshot, "expected snapshot command")
-	assert.True(t, foundDestroy, "expected destroy command")
+	assert.True(t, foundRename, "expected attempted quarantine rename")
+	assert.True(t, foundDestroy, "expected fallback destroy after failed rename")
 }
 
 func TestZFSCreateAdoptExisting(t *testing.T) {
@@ -176,4 +218,178 @@ func TestZFSCreateExistingNoAdopt(t *testing.T) {
 			t.Errorf("unexpected zfs create: %v", cmd)
 		}
 	}
+}
+
+func TestZFSReconcileQuota(t *testing.T) {
+	quota := int64(10 * 1024 * 1024 * 1024)
+
+	t.Run("sets quota when different", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("5368709120\n") // 5Gi
+
+		d := New(WithExecutor(exec))
+		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, false)
+		require.NoError(t, err)
+		assert.Equal(t, []string{fmt.Sprintf("quota=%d", quota)}, changes)
+		assert.Contains(t, exec.commands, []string{"zfs", "set", fmt.Sprintf("quota=%d", quota), "tank/k8s/pvc"})
+	})
+
+	t.Run("no-op when matching", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
+
+		d := New(WithExecutor(exec))
+		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, false)
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+		assert.Len(t, exec.commands, 1, "only the quota get should have run")
+	})
+
+	t.Run("unsets quota when nil and quota exists", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
+
+		d := New(WithExecutor(exec))
+		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", nil, false)
+		require.NoError(t, err)
+		assert.Equal(t, []string{"quota=none"}, changes)
+		assert.Contains(t, exec.commands, []string{"zfs", "set", "quota=none", "tank/k8s/pvc"})
+	})
+
+	t.Run("no-op when nil and unset", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("0\n")
+
+		d := New(WithExecutor(exec))
+		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", nil, false)
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+		assert.Len(t, exec.commands, 1)
+	})
+
+	t.Run("dry run records nothing", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("5368709120\n")
+
+		d := New(WithExecutor(exec))
+		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, true)
+		require.NoError(t, err)
+		assert.Equal(t, []string{fmt.Sprintf("quota=%d", quota)}, changes)
+		for _, cmd := range exec.commands {
+			if len(cmd) >= 2 && cmd[1] == "set" {
+				t.Errorf("unexpected zfs set during dry run: %v", cmd)
+			}
+		}
+	})
+}
+
+func TestZFSReconcileProperties(t *testing.T) {
+	t.Run("sets changed and inherits removed", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o property,value,source all tank/k8s/pvc"] = []byte(
+			"compression\toff\tlocal\n" +
+				"atime\ton\tdefault\n" +
+				"mountpoint\t/tank/k8s/pvc\tlocal\n" +
+				"subvol.io:custom\tbar\tlocal\n")
+
+		d := New(WithExecutor(exec))
+		changes, err := d.ReconcileProperties(context.Background(), "tank/k8s/pvc", map[string]string{
+			"compression": "lz4",
+			"atime":       "off",
+		}, false)
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"compression=lz4", "atime=off", "subvol.io:custom=inherited"}, changes)
+	})
+
+	t.Run("skips non-reconcilable properties", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o property,value,source all tank/k8s/pvc"] = []byte(
+			"mountpoint\t/tank/k8s/pvc\tlocal\n")
+
+		d := New(WithExecutor(exec))
+		_, err := d.ReconcileProperties(context.Background(), "tank/k8s/pvc", map[string]string{
+			"compression":    "lz4",
+			"casesensitivity": "insensitive", // create-time only, must be ignored
+		}, false)
+		require.NoError(t, err)
+
+		var foundSet bool
+		for _, cmd := range exec.commands {
+			if len(cmd) >= 2 && cmd[1] == "set" && strings.HasPrefix(cmd[2], "casesensitivity") {
+				t.Errorf("unexpected zfs set for create-time-only property: %v", cmd)
+			}
+			if len(cmd) >= 2 && cmd[1] == "set" {
+				foundSet = true
+			}
+		}
+		assert.True(t, foundSet, "expected compression to be set")
+		// mountpoint is local but not reconcilable: must not be inherited.
+		for _, cmd := range exec.commands {
+			if len(cmd) >= 2 && cmd[1] == "inherit" {
+				t.Errorf("unexpected zfs inherit: %v", cmd)
+			}
+		}
+	})
+
+	t.Run("ignores inherited and default sources for removal", func(t *testing.T) {
+		exec := newRecordExecutor()
+		exec.responses["zfs get -H -o property,value,source all tank/k8s/pvc"] = []byte(
+			"compression\tzstd\tinherited from tank/k8s\n" +
+				"atime\ton\tdefault\n")
+
+		d := New(WithExecutor(exec))
+		_, err := d.ReconcileProperties(context.Background(), "tank/k8s/pvc", nil, false)
+		require.NoError(t, err)
+		for _, cmd := range exec.commands {
+			if len(cmd) >= 2 && (cmd[1] == "set" || cmd[1] == "inherit") {
+				t.Errorf("unexpected mutation: %v", cmd)
+			}
+		}
+	})
+}
+
+func TestZFSReconcileOwnerMode(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0755))
+
+	t.Run("skips when matching", func(t *testing.T) {
+		d := New(WithExecutor(newRecordExecutor()))
+		mode := os.FileMode(0755)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: dir,
+			Owner:     nil,
+			Mode:      &mode,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+
+	t.Run("changes mode and reports change", func(t *testing.T) {
+		d := New(WithExecutor(newRecordExecutor()))
+		mode := os.FileMode(0750)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: dir,
+			Mode:      &mode,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"mode=0750"}, changes)
+
+		fi, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.Equal(t, fs.FileMode(0750), fi.Mode().Perm())
+	})
+
+	t.Run("skips legacy mountpoints", func(t *testing.T) {
+		d := New(WithExecutor(newRecordExecutor()))
+		mode := os.FileMode(0750)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: "legacy",
+			Mode:      &mode,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
 }

@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/driver"
@@ -181,6 +182,247 @@ func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 	}, nil
 }
 
+// reconcilableProps lists standard ZFS properties the controller may
+// reconcile live. Anything outside this set (and user properties) is ignored
+// with a warning; casesensitivity, quota-family siblings (refquota,
+// reservation, refreservation) and other create-time-only properties are
+// intentionally excluded.
+var reconcilableProps = map[string]bool{
+	"compression":    true,
+	"atime":          true,
+	"relatime":       true,
+	"recordsize":     true,
+	"sync":           true,
+	"logbias":        true,
+	"primarycache":   true,
+	"secondarycache": true,
+	"exec":           true,
+	"setuid":         true,
+	"devices":        true,
+	"readonly":       true,
+	"nbmand":         true,
+	"snapdir":        true,
+	"acltype":        true,
+	"aclinherit":     true,
+	"dedup":          true,
+	"checksum":       true,
+	"copies":         true,
+}
+
+// parseZFSQuota parses a `zfs get quota` value; "0", "none" and "-" mean unset.
+func parseZFSQuota(s string) (int64, error) {
+	s = strings.TrimSpace(s)
+	if s == "" || s == "-" || s == "0" || s == "none" {
+		return 0, nil
+	}
+	return strconv.ParseInt(s, 10, 64)
+}
+
+func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
+	out, err := d.executor.Run(ctx, nil, d.zfsPath, "get", "-H", "-o", "value", "quota", name)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read quota of zfs dataset %q: %w", name, err)
+	}
+	current, err := parseZFSQuota(string(out))
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse quota of zfs dataset %q: %w", name, err)
+	}
+
+	if quotaBytes == nil {
+		if current == 0 {
+			return nil, nil
+		}
+		if err := d.runZfsSet(ctx, dryRun, name, "quota=none"); err != nil {
+			return nil, fmt.Errorf("failed to unset quota of zfs dataset %q: %w", name, err)
+		}
+		return []string{"quota=none"}, nil
+	}
+	if current == *quotaBytes {
+		return nil, nil
+	}
+	if err := d.runZfsSet(ctx, dryRun, name, fmt.Sprintf("quota=%d", *quotaBytes)); err != nil {
+		return nil, fmt.Errorf("failed to set quota of zfs dataset %q to %d: %w", name, *quotaBytes, err)
+	}
+	return []string{fmt.Sprintf("quota=%d", *quotaBytes)}, nil
+}
+
+func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOptions) ([]string, error) {
+	if opts.Owner == nil && opts.Mode == nil {
+		return nil, nil
+	}
+	if opts.MountPath == "" || opts.MountPath == "none" || opts.MountPath == "legacy" {
+		return nil, nil
+	}
+	path := opts.MountPath
+	if opts.HostPrefix != "" {
+		path = filepath.Join(opts.HostPrefix, path)
+	}
+	fi, err := os.Stat(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			log.Warn().Str("path", path).Msg("Mount directory does not exist, skipping owner/mode reconciliation")
+			return nil, nil
+		}
+		return nil, fmt.Errorf("failed to stat zfs dataset mountpoint %q: %w", path, err)
+	}
+
+	var changes []string
+	if opts.Owner != nil {
+		if fi.Sys() != nil {
+			if stat, ok := fi.Sys().(*syscall.Stat_t); ok && (stat.Uid != uint32(opts.Owner.UID) || stat.Gid != uint32(opts.Owner.GID)) {
+				change := fmt.Sprintf("owner=%d:%d", opts.Owner.UID, opts.Owner.GID)
+				if !opts.DryRun {
+					if err := os.Chown(path, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
+						return nil, fmt.Errorf("failed to chown %q: %w", path, err)
+					}
+				} else {
+					log.Info().Str("path", path).Msg("DRY RUN: would chown dataset mountpoint")
+				}
+				changes = append(changes, change)
+			}
+		}
+	}
+	if opts.Mode != nil {
+		want := opts.Mode.Perm()
+		if fi.Mode().Perm() != want {
+			change := fmt.Sprintf("mode=%04o", want)
+			if !opts.DryRun {
+				if err := os.Chmod(path, want); err != nil {
+					return nil, fmt.Errorf("failed to chmod %q: %w", path, err)
+				}
+			} else {
+				log.Info().Str("path", path).Msg("DRY RUN: would chmod dataset mountpoint")
+			}
+			changes = append(changes, change)
+		}
+	}
+	return changes, nil
+}
+
+// getProps queries the given properties (plus user properties) and returns
+// prop -> {value, source}.
+func (d *Driver) getProps(ctx context.Context, name string, props []string) (map[string]zfsPropValue, error) {
+	args := []string{"get", "-H", "-o", "property,value,source"}
+	if len(props) > 0 {
+		args = append(args, strings.Join(append([]string{}, props...), ","))
+	} else {
+		args = append(args, "all")
+	}
+	args = append(args, name)
+	out, err := d.executor.Run(ctx, nil, d.zfsPath, args...)
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[string]zfsPropValue)
+	for _, line := range strings.Split(string(out), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		v := zfsPropValue{Value: fields[1]}
+		if len(fields) >= 3 {
+			v.Source = fields[len(fields)-1]
+		}
+		result[fields[0]] = v
+	}
+	return result, nil
+}
+
+type zfsPropValue struct {
+	Value  string
+	Source string
+}
+
+// isLocallySet reports whether a property is set directly on the dataset
+// (source "local" or a user property like "subvol.io:foo").
+func isLocallySet(source string) bool {
+	return strings.HasPrefix(source, "local") || strings.Contains(source, ":")
+}
+
+func (d *Driver) ReconcileProperties(ctx context.Context, name string, props map[string]string, dryRun bool) ([]string, error) {
+	var changes []string
+
+	// Filter out properties that are not safe/possible to reconcile live.
+	desired := make(map[string]string, len(props))
+	for k, v := range props {
+		if strings.Contains(k, ":") {
+			desired[k] = v
+			continue
+		}
+		if !reconcilableProps[k] {
+			log.Warn().Str("dataset", name).Str("property", k).Msg("Skipping non-reconcilable ZFS property")
+			continue
+		}
+		desired[k] = v
+	}
+
+	current, err := d.getProps(ctx, name, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to read properties of zfs dataset %q: %w", name, err)
+	}
+
+	// Set/override desired properties that differ.
+	for k, v := range desired {
+		cur, ok := current[k]
+		if ok && cur.Value == v {
+			continue
+		}
+		if err := d.runZfsSet(ctx, dryRun, name, fmt.Sprintf("%s=%s", k, v)); err != nil {
+			return nil, fmt.Errorf("failed to set zfs property %q on %q: %w", k, name, err)
+		}
+		changes = append(changes, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// Remove locally-set properties that are no longer desired.
+	for k, cur := range current {
+		if _, keep := desired[k]; keep {
+			continue
+		}
+		if !isLocallySet(cur.Source) {
+			continue
+		}
+		if !strings.Contains(k, ":") && !reconcilableProps[k] {
+			continue
+		}
+		if err := d.runZfsInherit(ctx, dryRun, name, k); err != nil {
+			return nil, fmt.Errorf("failed to inherit zfs property %q on %q: %w", k, name, err)
+		}
+		changes = append(changes, fmt.Sprintf("%s=inherited", k))
+	}
+
+	return changes, nil
+}
+
+// runZfsSet applies a single property via `zfs set`, or only logs the planned
+// command when dryRun is true.
+func (d *Driver) runZfsSet(ctx context.Context, dryRun bool, name, prop string) error {
+	if dryRun {
+		log.Info().Str("dataset", name).Str("property", prop).Msg("DRY RUN: would run zfs set")
+		return nil
+	}
+	if _, err := d.executor.Run(ctx, nil, d.zfsPath, "set", prop, name); err != nil {
+		return err
+	}
+	return nil
+}
+
+// runZfsInherit resets a property to its inherited/default value, or only logs
+// the planned command when dryRun is true.
+func (d *Driver) runZfsInherit(ctx context.Context, dryRun bool, name, prop string) error {
+	if dryRun {
+		log.Info().Str("dataset", name).Str("property", prop).Msg("DRY RUN: would run zfs inherit")
+		return nil
+	}
+	if _, err := d.executor.Run(ctx, nil, d.zfsPath, "inherit", name, prop); err != nil {
+		return err
+	}
+	return nil
+}
+
 func (d *Driver) Delete(ctx context.Context, opts driver.DeleteOptions) error {
 	if opts.Name == "" {
 		return fmt.Errorf("dataset name cannot be empty")
@@ -196,10 +438,12 @@ func (d *Driver) Delete(ctx context.Context, opts driver.DeleteOptions) error {
 	}
 
 	if opts.SnapshotBeforeDelete {
-		snapName := fmt.Sprintf("%s@deleted-%d", opts.Name, time.Now().Unix())
-		log.Info().Str("snapshot", snapName).Msg("Creating pre-destroy snapshot")
-		if _, err := d.executor.Run(ctx, nil, d.zfsPath, "snapshot", snapName); err != nil {
-			log.Warn().Err(err).Str("snapshot", snapName).Msg("Failed to create pre-destroy snapshot, proceeding with destroy")
+		quarantineName := fmt.Sprintf("%s-deleted-%d", opts.Name, time.Now().Unix())
+		log.Info().Str("dataset", opts.Name).Str("quarantine", quarantineName).Msg("Renaming dataset to quarantine")
+		if _, err := d.executor.Run(ctx, nil, d.zfsPath, "rename", opts.Name, quarantineName); err != nil {
+			log.Warn().Err(err).Str("quarantine", quarantineName).Msg("Failed to rename dataset to quarantine, proceeding with destroy")
+		} else {
+			return nil
 		}
 	}
 

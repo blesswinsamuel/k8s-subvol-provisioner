@@ -3,6 +3,7 @@ package controller
 import (
 	"context"
 	"fmt"
+	"os"
 	"path"
 	"strings"
 	"sync"
@@ -14,6 +15,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
@@ -104,6 +106,7 @@ func (c *Controller) Run(ctx context.Context) error {
 
 func (c *Controller) reconcileAll(ctx context.Context) {
 	c.reconcileClaims(ctx)
+	c.reconcileVolumeStates(ctx)
 	c.reconcileVolumes(ctx)
 }
 
@@ -222,9 +225,15 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	}
 
 	// Quota
+	quotaPtr, err := resolveQuota(pvc)
+	if err != nil {
+		log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to resolve quota")
+		c.emitEvent(pvc, corev1.EventTypeWarning, "QuotaResolutionFailed", err.Error())
+		return
+	}
 	var quotaBytes int64
-	if req, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok {
-		quotaBytes = req.Value()
+	if quotaPtr != nil {
+		quotaBytes = *quotaPtr
 	}
 
 	// Ownership and Mode
@@ -240,8 +249,11 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	}
 	mode, _ := config.ParseFileMode(modeStr)
 
-	// Properties
+	// Properties: StorageClass base, overlaid by the PVC annotation.
 	properties := config.ParseKeyValueLines(sc.Parameters[config.ParamProperties])
+	for k, v := range config.ParseKeyValueLines(pvc.Annotations[config.AnnProperties]) {
+		properties[k] = v
+	}
 
 	// Encryption
 	encConfig := &config.EncryptionConfig{}
@@ -477,5 +489,178 @@ func (c *Controller) loadSecretKey(ctx context.Context, defaultNamespace, ref st
 func (c *Controller) emitEvent(obj runtime.Object, eventType, reason, message string) {
 	if c.recorder != nil && obj != nil {
 		c.recorder.Event(obj, eventType, reason, message)
+	}
+}
+
+// dummyStorageRequest is the requests.storage value that signals "size is a
+// placeholder, do not derive the quota from it". Use it together with the
+// subvol.io/quota annotation (or with no quota at all).
+const dummyStorageRequest = int64(1)
+
+// resolveQuota resolves the quota for a PVC:
+//  1. subvol.io/quota annotation (quantity, or "none"/"unlimited" for no quota)
+//  2. requests.storage, unless it equals the dummy value 1 (unmanaged)
+//
+// A nil result means the dataset should have no quota.
+func resolveQuota(pvc *corev1.PersistentVolumeClaim) (*int64, error) {
+	if raw, ok := pvc.Annotations[config.AnnQuota]; ok {
+		raw = strings.TrimSpace(raw)
+		if raw == "none" || raw == "unlimited" {
+			return nil, nil
+		}
+		q, err := resource.ParseQuantity(raw)
+		if err != nil {
+			return nil, fmt.Errorf("invalid %s annotation %q: %w", config.AnnQuota, raw, err)
+		}
+		v := q.Value()
+		return &v, nil
+	}
+	if req, ok := pvc.Spec.Resources.Requests[corev1.ResourceStorage]; ok && req.Value() != dummyStorageRequest {
+		v := req.Value()
+		return &v, nil
+	}
+	return nil, nil
+}
+
+// reconcileVolumeStates reconciles annotation-driven config (quota, owner,
+// mode, properties) onto the backend datasets of already-bound PVCs.
+func (c *Controller) reconcileVolumeStates(ctx context.Context) {
+	pvcs, err := c.client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
+	if err != nil {
+		log.Error().Err(err).Msg("Failed to list PVCs for state reconciliation")
+		return
+	}
+
+	for i := range pvcs.Items {
+		pvc := &pvcs.Items[i]
+		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
+			continue
+		}
+		pv, err := c.client.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
+		if err != nil {
+			continue
+		}
+		if pv.Annotations[config.AnnProvisionedBy] != c.provisionerName {
+			continue
+		}
+		if !c.isPVOnThisNode(pv) {
+			continue
+		}
+		c.reconcileVolumeState(ctx, pvc, pv)
+	}
+}
+
+func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+	key := fmt.Sprintf("state:%s/%s", pvc.Namespace, pvc.Name)
+	c.mu.Lock()
+	if c.inProgress[key] {
+		c.mu.Unlock()
+		return
+	}
+	c.inProgress[key] = true
+	c.mu.Unlock()
+
+	defer func() {
+		c.mu.Lock()
+		delete(c.inProgress, key)
+		c.mu.Unlock()
+	}()
+
+	d, ok := c.drivers[pv.Annotations[config.AnnSubvolDriver]]
+	if !ok {
+		return
+	}
+	rec, ok := d.(driver.Reconciler)
+	if !ok {
+		log.Debug().Str("driver", d.Name()).Msg("Driver does not support live reconciliation, skipping")
+		return
+	}
+
+	datasetName := pv.Annotations[config.AnnDatasetName]
+	if datasetName == "" {
+		return
+	}
+	mountPath := pv.Annotations[config.AnnHostMountPath]
+	dryRun := pvc.Annotations[config.AnnDryRun] == "true"
+
+	var changes []string
+	fail := func(err error, what string) {
+		log.Error().Err(err).Str("pvc", pvc.Name).Str("dataset", datasetName).Msgf("Failed to reconcile volume state: %s", what)
+		c.emitEvent(pvc, corev1.EventTypeWarning, "VolumeUpdateFailed", fmt.Sprintf("%s: %v", what, err))
+	}
+
+	// Quota
+	quota, err := resolveQuota(pvc)
+	if err != nil {
+		fail(err, "resolve quota")
+		return
+	}
+	qc, err := rec.ReconcileQuota(ctx, datasetName, quota, dryRun)
+	if err != nil {
+		fail(err, "quota")
+	} else {
+		changes = append(changes, qc...)
+	}
+
+	// Owner/mode: PVC annotation -> StorageClass default.
+	var owner *config.Ownership
+	var mode *os.FileMode
+	if scName := pvc.Spec.StorageClassName; scName != nil && *scName != "" {
+		if sc, err := c.client.StorageV1().StorageClasses().Get(ctx, *scName, metav1.GetOptions{}); err == nil {
+			ownerStr := pvc.Annotations[config.AnnOwner]
+			if ownerStr == "" {
+				ownerStr = sc.Parameters[config.ParamDefaultOwner]
+			}
+			owner, _ = config.ParseOwnership(ownerStr)
+			modeStr := pvc.Annotations[config.AnnMode]
+			if modeStr == "" {
+				modeStr = sc.Parameters[config.ParamDefaultMode]
+			}
+			mode, _ = config.ParseFileMode(modeStr)
+		}
+	}
+	oc, err := rec.ReconcileOwnerMode(ctx, driver.OwnerModeOptions{
+		Name:       datasetName,
+		MountPath:  mountPath,
+		HostPrefix: c.hostPrefix,
+		Owner:      owner,
+		Mode:       mode,
+		DryRun:     dryRun,
+	})
+	if err != nil {
+		fail(err, "owner/mode")
+	} else {
+		changes = append(changes, oc...)
+	}
+
+	// Properties: StorageClass base, overlaid by the PVC annotation.
+	props := map[string]string{}
+	if scName := pvc.Spec.StorageClassName; scName != nil && *scName != "" {
+		if sc, err := c.client.StorageV1().StorageClasses().Get(ctx, *scName, metav1.GetOptions{}); err == nil {
+			for k, v := range config.ParseKeyValueLines(sc.Parameters[config.ParamProperties]) {
+				props[k] = v
+			}
+		}
+	}
+	for k, v := range config.ParseKeyValueLines(pvc.Annotations[config.AnnProperties]) {
+		props[k] = v
+	}
+	pc, err := rec.ReconcileProperties(ctx, datasetName, props, dryRun)
+	if err != nil {
+		fail(err, "properties")
+	} else {
+		changes = append(changes, pc...)
+	}
+
+	if len(changes) == 0 {
+		return
+	}
+	summary := strings.Join(changes, ", ")
+	if dryRun {
+		log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("DRY RUN: planned volume changes")
+		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeDryRun", fmt.Sprintf("Dry run: would apply: %s", summary))
+	} else {
+		log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("Reconciled volume state")
+		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeUpdated", fmt.Sprintf("Applied: %s", summary))
 	}
 }

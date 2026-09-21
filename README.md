@@ -69,8 +69,46 @@ When a `PersistentVolumeClaim` is submitted:
 | `subvol.io/mode` | Explicit permission mode bits (e.g. `0770`). |
 | `subvol.io/key-location` | HTTP/HTTPS or local key location for ZFS encryption. |
 | `subvol.io/secret-key-ref` | Reference to a Kubernetes secret containing the key (`namespace/secret#key`). |
-| `subvol.io/snapshot-before-delete` | When set to `"true"` and reclaim policy is `Delete`, creates a pre-deletion snapshot before destroying. |
+| `subvol.io/snapshot-before-delete` | When set to `"true"` and reclaim policy is `Delete`, preserves the volume's data before deletion: ZFS and the directory backend rename the dataset/directory to a sibling `<name>-deleted-<timestamp>`, Btrfs creates a read-only sibling snapshot. If preservation fails, deletion proceeds. |
 | `subvol.io/adopt-existing` | When set to `"true"`, adopts an already-existing dataset/subvolume as-is (no create, quota, ownership, or property mutations) and binds a new PV to it. Without this annotation, an existing dataset is an error. |
+| `subvol.io/quota` | Live quota override, e.g. `10Gi`. Accepts `none`/`unlimited` to remove the quota. Reconciled on every sync (grow **and** shrink). See [Live Volume Reconcile](#live-volume-reconcile). |
+| `subvol.io/properties` | Live filesystem property overrides (multi-line key=val), overlaid on top of the StorageClass `properties`. Removed keys fall back to the StorageClass value. |
+| `subvol.io/dry-run` | When set to `"true"`, the reconcile pass computes the planned changes for this volume (quota, ownership, mode, properties) but does not apply them; the plan is logged and emitted as a `VolumeDryRun` event. |
+
+---
+
+## Live Volume Reconcile
+
+> **Non-standard, provisioner-managed behavior.** Kubernetes only allows
+> *increasing* a bound PVC's storage, and the in-tree `local` volume plugin
+> used by this provisioner does not support volume expansion at all. This
+> provisioner therefore reconciles quota/config changes itself by watching
+> bound PVCs each resync cycle (`--resync-period`, default 15s) and applying
+> changes directly to the dataset.
+
+Reconciled per bound PVC of this provisioner (ZFS driver):
+
+| Config | Source | Live updates |
+| :--- | :--- | :--- |
+| Quota | `subvol.io/quota` annotation → `requests.storage` (unless it equals `1`, the dummy "unmanaged" value) → no quota | Yes (set/diff, `quota=none` when unmanaged) |
+| Owner | `subvol.io/owner` → StorageClass `defaultOwner` → none | Yes (chown of the mountpoint) |
+| Mode | `subvol.io/mode` → StorageClass `defaultMode` → none | Yes (chmod) |
+| Properties | StorageClass `properties` overlaid by `subvol.io/properties` | Yes: changed properties are set; locally-set properties removed from the desired set are reset via `zfs inherit` |
+| Encryption, path/dataset name | — | Provision-time only; never reconciled |
+
+Notes:
+
+- If a PVC's `requests.storage` is the dummy value `1` (e.g. `1` bytes) and no
+  `subvol.io/quota` annotation is present, the quota is unmanaged and the
+  provisioner will actively remove any existing quota (`quota=none`).
+- Only a known-safe set of standard ZFS properties is reconciled
+  (`compression`, `atime`, `relatime`, `recordsize`, `sync`, `logbias`,
+  `primarycache`, `secondarycache`, `exec`, `setuid`, `devices`, `readonly`,
+  `nbmand`, `snapdir`, `acltype`, `aclinherit`, `dedup`, `checksum`,
+  `copies`) plus user properties (`namespace:prop`). Create-time-only
+  properties (`casesensitivity`, `refquota`, `reservation`, …) are ignored.
+- Dry run: annotate the PVC with `subvol.io/dry-run: "true"`, inspect the
+  `VolumeDryRun` event, then remove the annotation to apply.
 
 ---
 
