@@ -1,0 +1,19 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: demo-app-data
+  namespace: default
+  annotations:
+    subvol.io/owner: "1000:1000"
+    subvol.io/mode: "0750"
+    # Optional override for subvolume name
+    # subvol.io/subvol: "custom/path"
+    # Optional snapshot before delete
+    # subvol.io/snapshot-before-delete: "true"
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: zfs-fast
+  resources:
+    requests:
+      storage: 20Gi

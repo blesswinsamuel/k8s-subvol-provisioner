@@ -1,0 +1,17 @@
+# Binaries
+bin/
+/subvol-provisioner
+
+# Test artifacts
+*.test
+*.out
+coverage.html
+
+# OS and IDE files
+.DS_Store
+.idea/
+.vscode/
+
+# Local scratches
+scratch/
+tmp/

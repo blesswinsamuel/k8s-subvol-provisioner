@@ -1,0 +1,21 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: zfs-fast
+provisioner: subvol.io/provisioner
+volumeBindingMode: Immediate # Or WaitForFirstConsumer
+reclaimPolicy: Retain # Or Delete
+parameters:
+  driver: zfs
+  node: nas-pc
+  parent: tank/k8s
+  mountPrefix: /mnt/tank/k8s
+  pathTemplate: "{{ .Namespace }}/{{ if .Index }}{{ .Owner }}/{{ .Index }}{{ else }}{{ .PVC }}{{ end }}"
+  defaultOwner: "1000:1000"
+  defaultMode: "0750"
+  properties: |
+    compression=zstd
+    atime=off
+  encryption: |
+    keyformat=hex
+    keylocation=http://vault.homelab:8200/v1/secret/data/zfs-keys/tank

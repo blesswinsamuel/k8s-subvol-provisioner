@@ -1,0 +1,35 @@
+package config
+
+const (
+	// DefaultProvisionerName is the default provisioner name registered in StorageClasses.
+	DefaultProvisionerName = "subvol.io/provisioner"
+
+	// Annotation Prefix
+	AnnotationPrefix = "subvol.io/"
+
+	// PVC Annotations
+	AnnSubvolPath     = "subvol.io/subvol"                  // Custom subvolume/dataset name override (relative to parent)
+	AnnOwner          = "subvol.io/owner"                   // "UID:GID" e.g. "1000:1000"
+	AnnMode           = "subvol.io/mode"                    // Directory permissions e.g. "0750"
+	AnnKeyLocation    = "subvol.io/key-location"            // Encryption key location override (e.g. "http://vault:8200/..." or "file:///...")
+	AnnSecretKeyRef   = "subvol.io/secret-key-ref"          // Reference to K8s secret containing key: "namespace/name#key"
+	AnnSnapshotBeforeDelete = "subvol.io/snapshot-before-delete" // "true" to create a snapshot before deletion
+	AnnSelectedNode   = "volume.kubernetes.io/selected-node"
+
+	// PV Annotations / Labels added by provisioner
+	AnnProvisionedBy  = "pv.kubernetes.io/provisioned-by"
+	AnnSubvolDriver   = "subvol.io/driver"
+	AnnDatasetName    = "subvol.io/dataset"
+	AnnHostMountPath  = "subvol.io/mount-path"
+
+	// StorageClass Parameter Keys
+	ParamDriver        = "driver"        // "zfs" or "btrfs"
+	ParamNode          = "node"          // Pinned node name (used with Immediate volumeBindingMode)
+	ParamParent        = "parent"        // Parent dataset / subvolume path (e.g. "tank/k8s")
+	ParamMountPrefix   = "mountPrefix"   // Base host mount directory prefix (e.g. "/mnt/tank/k8s")
+	ParamPathTemplate  = "pathTemplate"  // Path template, default: "{{ .Namespace }}/{{ .PVC }}"
+	ParamDefaultOwner  = "defaultOwner"  // Default "UID:GID" if not specified on PVC
+	ParamDefaultMode   = "defaultMode"   // Default permission bits e.g. "0750"
+	ParamProperties    = "properties"    // Multi-line key=val or YAML of filesystem properties (e.g. compression, atime)
+	ParamEncryption    = "encryption"    // Multi-line key=val or YAML of encryption settings (keyformat, keylocation)
+)

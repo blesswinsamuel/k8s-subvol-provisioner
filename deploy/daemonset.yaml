@@ -1,0 +1,52 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: subvol-provisioner
+  namespace: kube-system
+  labels:
+    app.kubernetes.io/name: subvol-provisioner
+spec:
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: subvol-provisioner
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: subvol-provisioner
+    spec:
+      serviceAccountName: subvol-provisioner
+      hostNetwork: false
+      hostPID: true
+      containers:
+        - name: provisioner
+          image: ghcr.io/blesswinsamuel/k8s-subvol-provisioner:latest
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            privileged: true
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+            - name: PROVISIONER_NAME
+              value: "subvol.io/provisioner"
+          volumeMounts:
+            - name: dev
+              mountPath: /dev
+            - name: host-mnt
+              mountPath: /mnt
+              mountPropagation: Bidirectional
+          resources:
+            requests:
+              cpu: 10m
+              memory: 32Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: dev
+          hostPath:
+            path: /dev
+        - name: host-mnt
+          hostPath:
+            path: /mnt
