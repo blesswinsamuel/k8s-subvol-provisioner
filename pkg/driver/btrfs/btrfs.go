@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -113,15 +114,19 @@ func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 	}
 
 	// Apply ownership & mode
-	if fi, err := os.Stat(targetPath); err == nil && fi.IsDir() {
+	effectivePath := targetPath
+	if opts.HostPrefix != "" && targetPath != "" {
+		effectivePath = filepath.Join(opts.HostPrefix, targetPath)
+	}
+	if fi, err := os.Stat(effectivePath); err == nil && fi.IsDir() {
 		if opts.Owner != nil {
-			if err := os.Chown(targetPath, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
-				log.Warn().Err(err).Str("path", targetPath).Msg("Failed to chown btrfs subvolume")
+			if err := os.Chown(effectivePath, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
+				log.Warn().Err(err).Str("path", effectivePath).Msg("Failed to chown btrfs subvolume")
 			}
 		}
 		if opts.Mode != nil {
-			if err := os.Chmod(targetPath, *opts.Mode); err != nil {
-				log.Warn().Err(err).Str("path", targetPath).Msg("Failed to chmod btrfs subvolume")
+			if err := os.Chmod(effectivePath, *opts.Mode); err != nil {
+				log.Warn().Err(err).Str("path", effectivePath).Msg("Failed to chmod btrfs subvolume")
 			}
 		}
 	}

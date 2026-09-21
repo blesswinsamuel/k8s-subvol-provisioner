@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -138,16 +139,20 @@ func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 	}
 
 	// Apply ownership & mode if mount directory exists on host
-	if mountPath != "" && mountPath != "none" && mountPath != "legacy" {
-		if fi, err := os.Stat(mountPath); err == nil && fi.IsDir() {
+	effectivePath := mountPath
+	if opts.HostPrefix != "" && mountPath != "" {
+		effectivePath = filepath.Join(opts.HostPrefix, mountPath)
+	}
+	if effectivePath != "" && mountPath != "none" && mountPath != "legacy" {
+		if fi, err := os.Stat(effectivePath); err == nil && fi.IsDir() {
 			if opts.Owner != nil {
-				if err := os.Chown(mountPath, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
-					log.Warn().Err(err).Str("path", mountPath).Msg("Failed to chown dataset mountpoint")
+				if err := os.Chown(effectivePath, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
+					log.Warn().Err(err).Str("path", effectivePath).Msg("Failed to chown dataset mountpoint")
 				}
 			}
 			if opts.Mode != nil {
-				if err := os.Chmod(mountPath, *opts.Mode); err != nil {
-					log.Warn().Err(err).Str("path", mountPath).Msg("Failed to chmod dataset mountpoint")
+				if err := os.Chmod(effectivePath, *opts.Mode); err != nil {
+					log.Warn().Err(err).Str("path", effectivePath).Msg("Failed to chmod dataset mountpoint")
 				}
 			}
 		}

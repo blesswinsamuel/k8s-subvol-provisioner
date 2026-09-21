@@ -19,6 +19,7 @@ type VolumeInfo struct {
 type CreateOptions struct {
 	Name        string
 	MountPath   string
+	HostPrefix  string
 	QuotaBytes  int64
 	Owner       *config.Ownership
 	Mode        *os.FileMode
@@ -30,6 +31,7 @@ type CreateOptions struct {
 type DeleteOptions struct {
 	Name                 string
 	MountPath            string
+	HostPrefix           string
 	SnapshotBeforeDelete bool
 }
 

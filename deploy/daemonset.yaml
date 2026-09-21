@@ -30,11 +30,13 @@ spec:
                   fieldPath: spec.nodeName
             - name: PROVISIONER_NAME
               value: "subvol.io/provisioner"
+            - name: HOST_PREFIX
+              value: "/host"
           volumeMounts:
             - name: dev
               mountPath: /dev
-            - name: host-mnt
-              mountPath: /mnt
+            - name: host-root
+              mountPath: /host
               mountPropagation: Bidirectional
           resources:
             requests:
@@ -47,6 +49,6 @@ spec:
         - name: dev
           hostPath:
             path: /dev
-        - name: host-mnt
+        - name: host-root
           hostPath:
-            path: /mnt
+            path: /

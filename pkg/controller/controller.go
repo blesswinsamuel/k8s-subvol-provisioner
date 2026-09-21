@@ -24,6 +24,7 @@ type ControllerOptions struct {
 	Client          kubernetes.Interface
 	NodeName        string
 	ProvisionerName string
+	HostPrefix      string
 	Drivers         map[string]driver.Driver
 	Recorder        record.EventRecorder
 	ResyncPeriod    time.Duration
@@ -34,6 +35,7 @@ type Controller struct {
 	client          kubernetes.Interface
 	nodeName        string
 	provisionerName string
+	hostPrefix      string
 	drivers         map[string]driver.Driver
 	recorder        record.EventRecorder
 	resyncPeriod    time.Duration
@@ -61,6 +63,7 @@ func NewController(opts ControllerOptions) (*Controller, error) {
 		client:          opts.Client,
 		nodeName:        opts.NodeName,
 		provisionerName: opts.ProvisionerName,
+		hostPrefix:      opts.HostPrefix,
 		drivers:         opts.Drivers,
 		recorder:        opts.Recorder,
 		resyncPeriod:    opts.ResyncPeriod,
@@ -266,6 +269,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	createOpts := driver.CreateOptions{
 		Name:        datasetName,
 		MountPath:   mountPath,
+		HostPrefix:  c.hostPrefix,
 		QuotaBytes:  quotaBytes,
 		Owner:       owner,
 		Mode:        mode,
@@ -401,6 +405,7 @@ func (c *Controller) reconcileVolumeDelete(ctx context.Context, pv *corev1.Persi
 	err := d.Delete(ctx, driver.DeleteOptions{
 		Name:                 datasetName,
 		MountPath:            mountPath,
+		HostPrefix:           c.hostPrefix,
 		SnapshotBeforeDelete: snapshotBeforeDelete,
 	})
 	if err != nil {
