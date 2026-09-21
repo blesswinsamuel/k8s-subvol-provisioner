@@ -251,6 +251,20 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		encConfig.KeyFormat = encMap["keyformat"]
 		encConfig.KeyLocation = encMap["keylocation"]
 	}
+	// StorageClass-level secret reference: resolves the keylocation URL from a K8s
+	// secret ("namespace/name#key"), keeping tokenized key-server URLs out of manifests.
+	if secretRef, ok := sc.Parameters[config.ParamKeyLocationSecret]; ok && secretRef != "" {
+		data, err := c.loadSecretKey(ctx, pvc.Namespace, secretRef)
+		if err != nil {
+			log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to load keylocation secret")
+			c.emitEvent(pvc, corev1.EventTypeWarning, "SecretLoadFailed", err.Error())
+			return
+		}
+		if loc := strings.TrimSpace(string(data)); loc != "" {
+			encConfig.Enabled = true
+			encConfig.KeyLocation = loc
+		}
+	}
 	if loc, ok := pvc.Annotations[config.AnnKeyLocation]; ok && loc != "" {
 		encConfig.Enabled = true
 		encConfig.KeyLocation = loc

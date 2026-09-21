@@ -57,6 +57,7 @@ When a `PersistentVolumeClaim` is submitted:
 | `defaultMode` | string | `""` | Default octal permissions (e.g. `0750`). |
 | `properties` | multiline | `""` | Key-value lines of filesystem properties (e.g. `compression=zstd`). |
 | `encryption` | multiline | `""` | Key-value lines of encryption options (`keyformat`, `keylocation`). |
+| `keylocationSecret` | string | `""` | K8s secret ref `namespace/name#key` whose value is the `keylocation` URL (resolved at provision time; overridden by the `subvol.io/key-location` PVC annotation). |
 
 ### PVC Annotations
 

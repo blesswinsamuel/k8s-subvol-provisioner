@@ -24,13 +24,14 @@ const (
 	AnnHostMountPath = "subvol.io/mount-path"
 
 	// StorageClass Parameter Keys
-	ParamDriver       = "driver"       // "zfs" or "btrfs"
-	ParamNode         = "node"         // Pinned node name (used with Immediate volumeBindingMode)
-	ParamParent       = "parent"       // Parent dataset / subvolume path (e.g. "tank/k8s")
-	ParamMountPrefix  = "mountPrefix"  // Base host mount directory prefix (e.g. "/mnt/tank/k8s")
-	ParamPathTemplate = "pathTemplate" // Path template, default: "{{ .Namespace }}/{{ .PVC }}"
-	ParamDefaultOwner = "defaultOwner" // Default "UID:GID" if not specified on PVC
-	ParamDefaultMode  = "defaultMode"  // Default permission bits e.g. "0750"
-	ParamProperties   = "properties"   // Multi-line key=val or YAML of filesystem properties (e.g. compression, atime)
-	ParamEncryption   = "encryption"   // Multi-line key=val or YAML of encryption settings (keyformat, keylocation)
+	ParamDriver            = "driver"            // "zfs" or "btrfs"
+	ParamNode              = "node"              // Pinned node name (used with Immediate volumeBindingMode)
+	ParamParent            = "parent"            // Parent dataset / subvolume path (e.g. "tank/k8s")
+	ParamMountPrefix       = "mountPrefix"       // Base host mount directory prefix (e.g. "/mnt/tank/k8s")
+	ParamPathTemplate      = "pathTemplate"      // Path template, default: "{{ .Namespace }}/{{ .PVC }}"
+	ParamDefaultOwner      = "defaultOwner"      // Default "UID:GID" if not specified on PVC
+	ParamDefaultMode       = "defaultMode"       // Default permission bits e.g. "0750"
+	ParamProperties        = "properties"        // Multi-line key=val or YAML of filesystem properties (e.g. compression, atime)
+	ParamEncryption        = "encryption"        // Multi-line key=val or YAML of encryption settings (keyformat, keylocation)
+	ParamKeyLocationSecret = "keylocationSecret" // K8s secret ref "namespace/name#key" containing the keylocation URL
 )

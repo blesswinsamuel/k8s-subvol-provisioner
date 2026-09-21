@@ -366,3 +366,76 @@ func TestControllerExistingNoAdopt(t *testing.T) {
 		}
 	}
 }
+
+func TestControllerKeyLocationSecret(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "zfs-mock",
+		},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver:            "mock",
+			config.ParamParent:            "pool/k8s",
+			config.ParamMountPrefix:       "/mnt/pool/k8s",
+			config.ParamPathTemplate:      "{{ .Namespace }}/{{ .PVC }}",
+			config.ParamNode:              "nas-pc",
+			config.ParamEncryption:        "keyformat=hex",
+			config.ParamKeyLocationSecret: "default/zfs-keys#key-location",
+		},
+	}
+
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "zfs-keys",
+			Namespace: "default",
+		},
+		Data: map[string][]byte{
+			"key-location": []byte("http://keys.home.lan:8080/token/pool\n"),
+		},
+	}
+
+	scName := "zfs-mock"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "enc-claim",
+			Namespace: "media",
+			UID:       "444-555-666",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			Resources: corev1.VolumeResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceStorage: resource.MustParse("10Gi"),
+				},
+			},
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc, secret)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+	})
+	require.NoError(t, err)
+
+	ctrl.reconcileClaims(ctx)
+
+	opts, ok := mockDriver.GetCreateOptions("pool/k8s/media/enc-claim")
+	require.True(t, ok, "expected mock driver create options")
+	require.NotNil(t, opts.Encryption, "expected encryption config to be set")
+	assert.True(t, opts.Encryption.Enabled)
+	assert.Equal(t, "hex", opts.Encryption.KeyFormat)
+	assert.Equal(t, "http://keys.home.lan:8080/token/pool", opts.Encryption.KeyLocation)
+	assert.Empty(t, opts.Encryption.KeyData, "keylocation secret must not be passed as raw key data")
+}
