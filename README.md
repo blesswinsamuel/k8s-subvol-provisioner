@@ -188,6 +188,8 @@ metadata:
   annotations:
     subvol.io/owner: "1000:1000"
     subvol.io/mode: "0770"
+    # Live quota override (optional): reconciled in place, grow and shrink
+    # subvol.io/quota: "150Gi"
 spec:
   accessModes:
     - ReadWriteOnce

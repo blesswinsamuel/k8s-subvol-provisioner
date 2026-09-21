@@ -10,6 +10,14 @@ metadata:
     # subvol.io/subvol: "custom/path"
     # Optional snapshot before delete
     # subvol.io/snapshot-before-delete: "true"
+    # Optional live quota override (reconciled grow and shrink; "none" to remove)
+    # subvol.io/quota: "50Gi"
+    # Optional live ZFS property overrides (StorageClass properties are the base)
+    # subvol.io/properties: |
+    #   compression=lz4
+    #   atime=off
+    # Preview planned changes without applying them
+    # subvol.io/dry-run: "true"
 spec:
   accessModes:
     - ReadWriteOnce
