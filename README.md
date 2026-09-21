@@ -1,5 +1,10 @@
 # k8s-subvol-provisioner
 
+[![Test](https://github.com/blesswinsamuel/k8s-subvol-provisioner/actions/workflows/test.yml/badge.svg)](https://github.com/blesswinsamuel/k8s-subvol-provisioner/actions/workflows/test.yml)
+[![Publish Container Image](https://github.com/blesswinsamuel/k8s-subvol-provisioner/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/blesswinsamuel/k8s-subvol-provisioner/actions/workflows/docker-publish.yml)
+[![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
+[![Go Version](https://img.shields.io/github/go-mod/go-version/blesswinsamuel/k8s-subvol-provisioner)](https://go.dev)
+
 `k8s-subvol-provisioner` is a lightweight, Kubernetes-native dynamic volume provisioner designed to provision native filesystem **datasets** (ZFS) and **subvolumes** (Btrfs) as `local` PersistentVolumes.
 
 Unlike traditional local path provisioners that merely create directories via `mkdir`, `k8s-subvol-provisioner` leverages native filesystem primitives:
@@ -163,3 +168,18 @@ Run test suite via Docker:
 ```bash
 make docker-build
 ```
+
+---
+
+## Contributing & Community
+
+Contributions and feedback are welcome!
+- **Contributing Guidelines**: Please read [CONTRIBUTING.md](CONTRIBUTING.md) for branch workflows and development instructions.
+- **Code of Conduct**: We expect contributors to adhere to our [Code of Conduct](CODE_OF_CONDUCT.md).
+- **Security**: For reporting security vulnerabilities, please refer to [SECURITY.md](SECURITY.md).
+
+---
+
+## License
+
+This project is licensed under the Apache License 2.0. See [LICENSE](LICENSE) for details.
