@@ -12,6 +12,7 @@ import (
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/controller"
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/driver"
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/driver/btrfs"
+	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/driver/dir"
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/driver/mock"
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/driver/zfs"
 	"github.com/rs/zerolog"
@@ -113,6 +114,7 @@ func run(flags *runFlags) error {
 	drivers := map[string]driver.Driver{
 		"zfs":   zfs.New(),
 		"btrfs": btrfs.New(),
+		"dir":   dir.New(),
 	}
 	if flags.enableMock {
 		drivers["mock"] = mock.New()

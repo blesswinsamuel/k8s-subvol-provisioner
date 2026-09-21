@@ -1,0 +1,13 @@
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-dir
+provisioner: subvol.io/provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+parameters:
+  driver: dir
+  mountPrefix: /mnt/storage
+  pathTemplate: "{{ .Namespace }}/{{ if .Index }}{{ .Owner }}/{{ .Index }}{{ else }}{{ .PVC }}{{ end }}"
+  defaultOwner: "1000:1000"
+  defaultMode: "0750"

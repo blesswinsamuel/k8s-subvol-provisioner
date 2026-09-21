@@ -5,11 +5,11 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 [![Go Version](https://img.shields.io/github/go-mod/go-version/blesswinsamuel/k8s-subvol-provisioner)](https://go.dev)
 
-`k8s-subvol-provisioner` is a lightweight, Kubernetes-native dynamic volume provisioner designed to provision native filesystem **datasets** (ZFS) and **subvolumes** (Btrfs) as `local` PersistentVolumes.
+`k8s-subvol-provisioner` is a lightweight, Kubernetes-native dynamic volume provisioner designed to provision native filesystem **datasets** (ZFS), **subvolumes** (Btrfs), and **directories** (any host filesystem, e.g. ext4, XFS) as `local` PersistentVolumes.
 
-Unlike traditional local path provisioners that merely create directories via `mkdir`, `k8s-subvol-provisioner` leverages native filesystem primitives:
-- **Hard Quotas**: Real ZFS `quota` and Btrfs `qgroups`, rather than relying on directory size estimation.
-- **Subvolume Isolation & Snapshots**: Dedicated datasets/subvolumes with pre-deletion safety snapshots.
+Unlike traditional local path provisioners that run ephemeral helper pods, `k8s-subvol-provisioner` runs directly within a DaemonSet:
+- **Hard Quotas**: Real ZFS `quota` and Btrfs `qgroups`.
+- **Subvolume & Directory Isolation**: Dedicated datasets/subvolumes/directories with pre-deletion safety backups.
 - **Hierarchical Path Templating**: Clean organization for namespaces, PVC names, and StatefulSet replica indices (`{{ .Namespace }}/{{ .Owner }}/{{ .Index }}`).
 - **Native Encryption**: Transparent ZFS encryption via HTTP/HTTPS key endpoints or Kubernetes Secrets.
 - **POSIX Permissions**: Declarative UID:GID ownership and permission mode bits (`0750`).
@@ -26,12 +26,13 @@ Unlike traditional local path provisioners that merely create directories via `m
                         |
             [ k8s-subvol-provisioner ] (DaemonSet on node)
                         |
-           +------------+------------+
-           |                         |
-     [ ZFS Driver ]           [ Btrfs Driver ]
-   (zfs create -o ...)      (btrfs subvol create)
-           |                         |
-           v                         v
+           +------------+------------+--------------------+
+           |                         |                    |
+     [ ZFS Driver ]           [ Btrfs Driver ]      [ Dir Driver ]
+   (zfs create -o ...)      (btrfs subvol create)    (mkdir -p)
+           |                         |                    |
+           +------------+------------+--------------------+
+                        v
    [ Local PersistentVolume (spec.local + nodeAffinity) ]
 ```
 
@@ -48,7 +49,7 @@ When a `PersistentVolumeClaim` is submitted:
 
 | Parameter | Type | Default | Description |
 | :--- | :--- | :--- | :--- |
-| `driver` | string | `zfs` | Filesystem driver (`zfs` or `btrfs`). |
+| `driver` | string | `zfs` | Filesystem driver (`zfs`, `btrfs`, or `dir`). |
 | `node` | string | `""` | Target node name (required when using `Immediate` binding mode). |
 | `parent` | string | `""` | Parent dataset path (e.g. `tank/k8s`). |
 | `mountPrefix` | string | `""` | Host mount root where the datasets are mounted (e.g. `/mnt/tank/k8s`). |
@@ -122,7 +123,24 @@ parameters:
     keylocation=http://vault.homelab:8200/v1/secret/data/zfs-keys/tank
 ```
 
-### 2. PersistentVolumeClaim
+### 2. Generic Directory StorageClass (Ext4, XFS, etc.)
+```yaml
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: local-dir
+provisioner: subvol.io/provisioner
+volumeBindingMode: WaitForFirstConsumer
+reclaimPolicy: Delete
+parameters:
+  driver: dir
+  mountPrefix: /mnt/storage
+  pathTemplate: "{{ .Namespace }}/{{ if .Index }}{{ .Owner }}/{{ .Index }}{{ else }}{{ .PVC }}{{ end }}"
+  defaultOwner: "1000:1000"
+  defaultMode: "0750"
+```
+
+### 3. PersistentVolumeClaim
 ```yaml
 apiVersion: v1
 kind: PersistentVolumeClaim

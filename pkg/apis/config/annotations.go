@@ -24,7 +24,7 @@ const (
 	AnnHostMountPath = "subvol.io/mount-path"
 
 	// StorageClass Parameter Keys
-	ParamDriver            = "driver"            // "zfs" or "btrfs"
+	ParamDriver            = "driver"            // "zfs", "btrfs", or "dir"
 	ParamNode              = "node"              // Pinned node name (used with Immediate volumeBindingMode)
 	ParamParent            = "parent"            // Parent dataset / subvolume path (e.g. "tank/k8s")
 	ParamMountPrefix       = "mountPrefix"       // Base host mount directory prefix (e.g. "/mnt/tank/k8s")
