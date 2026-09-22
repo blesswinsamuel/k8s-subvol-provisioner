@@ -225,7 +225,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 
 	t.Run("sets quota when different", func(t *testing.T) {
 		exec := newRecordExecutor()
-		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("5368709120\n") // 5Gi
+		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("5368709120\n") // 5Gi
 
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, false)
@@ -236,7 +236,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 
 	t.Run("no-op when matching", func(t *testing.T) {
 		exec := newRecordExecutor()
-		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
+		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
 
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, false)
@@ -247,7 +247,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 
 	t.Run("unsets quota when nil and quota exists", func(t *testing.T) {
 		exec := newRecordExecutor()
-		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
+		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
 
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", nil, false)
@@ -258,7 +258,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 
 	t.Run("no-op when nil and unset", func(t *testing.T) {
 		exec := newRecordExecutor()
-		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("0\n")
+		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("0\n")
 
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", nil, false)
@@ -269,7 +269,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 
 	t.Run("dry run records nothing", func(t *testing.T) {
 		exec := newRecordExecutor()
-		exec.responses["zfs get -H -o value quota tank/k8s/pvc"] = []byte("5368709120\n")
+		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("5368709120\n")
 
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, true)

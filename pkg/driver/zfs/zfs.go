@@ -219,7 +219,9 @@ func parseZFSQuota(s string) (int64, error) {
 }
 
 func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
-	out, err := d.executor.Run(ctx, nil, d.zfsPath, "get", "-H", "-o", "value", "quota", name)
+	// -p renders the quota in parsable bytes; without it zfs prints
+	// human-readable values (e.g. "1G", "2.10G") that cannot be compared.
+	out, err := d.executor.Run(ctx, nil, d.zfsPath, "get", "-H", "-p", "-o", "value", "quota", name)
 	if err != nil {
 		return nil, fmt.Errorf("failed to read quota of zfs dataset %q: %w", name, err)
 	}
