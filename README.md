@@ -83,7 +83,8 @@ When a `PersistentVolumeClaim` is submitted:
 > *increasing* a bound PVC's storage, and the in-tree `local` volume plugin
 > used by this provisioner does not support volume expansion at all. This
 > provisioner therefore reconciles quota/config changes itself by watching
-> bound PVCs each resync cycle (`--resync-period`, default 15s).
+> bound PVCs with informers (changes are detected via watch events, with the
+> informer resync `--resync-period`, default 10m, as a safety net).
 >
 > **Plan by default.** Changes are never applied blindly: each resync, the
 > provisioner computes the delta and emits a `VolumeDryRun` event on the PVC.

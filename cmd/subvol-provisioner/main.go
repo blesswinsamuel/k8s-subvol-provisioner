@@ -39,6 +39,7 @@ type runFlags struct {
 	provisionerName string
 	hostPrefix      string
 	resyncPeriod    time.Duration
+	workers         int
 	logLevel        string
 	enableMock      bool
 }
@@ -58,7 +59,8 @@ func main() {
 	rootCmd.Flags().StringVar(&flags.nodeName, "node-name", os.Getenv("NODE_NAME"), "Node name this provisioner agent is running on (defaults to NODE_NAME env var)")
 	rootCmd.Flags().StringVar(&flags.provisionerName, "provisioner-name", getEnvOrDefault("PROVISIONER_NAME", config.DefaultProvisionerName), "Provisioner name handled by this instance")
 	rootCmd.Flags().StringVar(&flags.hostPrefix, "host-prefix", os.Getenv("HOST_PREFIX"), "Host filesystem prefix path when running in a container (defaults to HOST_PREFIX env var)")
-	rootCmd.Flags().DurationVar(&flags.resyncPeriod, "resync-period", 15*time.Second, "Informer resync period")
+	rootCmd.Flags().DurationVar(&flags.resyncPeriod, "resync-period", 10*time.Minute, "Informer resync period (safety net for missed events)")
+	rootCmd.Flags().IntVar(&flags.workers, "workers", 4, "Number of concurrent reconcile workers")
 	rootCmd.Flags().StringVar(&flags.logLevel, "log-level", "info", "Log level (debug, info, warn, error)")
 	rootCmd.Flags().BoolVar(&flags.enableMock, "enable-mock", false, "Enable in-memory mock driver for development")
 
@@ -128,6 +130,7 @@ func run(flags *runFlags) error {
 		Drivers:         drivers,
 		Recorder:        recorder,
 		ResyncPeriod:    flags.resyncPeriod,
+		Workers:         flags.workers,
 	})
 	if err != nil {
 		return fmt.Errorf("failed to create controller: %w", err)

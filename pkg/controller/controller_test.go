@@ -69,7 +69,7 @@ func TestControllerProvisioning(t *testing.T) {
 	require.NoError(t, err)
 
 	// Run single reconciliation cycle
-	ctrl.reconcileClaims(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	// Check if mock driver created volume
 	expectedName := "pool/k8s/media/media-claim"
@@ -130,7 +130,7 @@ func TestControllerSkipOtherNode(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileClaims(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	// No PV should be created
 	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
@@ -192,7 +192,7 @@ func TestControllerDeleteReleasedPV(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileVolumes(ctx)
+	ctrl.processPV(ctx, pv)
 
 	// Mock driver volume should be deleted
 	exists, err := mockDriver.Exists(ctx, "tank/k8s/default/old-pvc")
@@ -267,7 +267,7 @@ func TestControllerAdoptExisting(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileClaims(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	// The PV should be built against the existing dataset.
 	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
@@ -345,7 +345,7 @@ func TestControllerExistingNoAdopt(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileClaims(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	// Without the annotation, an existing dataset must fail exactly as before:
 	// no PV created, ProvisioningFailed warning emitted.
@@ -437,7 +437,7 @@ func TestControllerReconcileVolumeStatePlanByDefault(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileVolumeStates(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	calls := mockDriver.GetReconcileCalls()
 	require.Len(t, calls, 3, "expected quota, owner/mode and properties reconcile calls")
@@ -538,7 +538,7 @@ func TestControllerReconcileVolumeStateAutoApply(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileVolumeStates(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	calls := mockDriver.GetReconcileCalls()
 	require.Len(t, calls, 3, "expected quota, owner/mode and properties reconcile calls")
@@ -616,7 +616,7 @@ func TestControllerReconcileVolumeStateApplyAnnotation(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileVolumeStates(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	calls := mockDriver.GetReconcileCalls()
 	require.Len(t, calls, 3, "expected quota, owner/mode and properties reconcile calls")
@@ -689,7 +689,7 @@ func TestControllerReconcileVolumeStateDryRun(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileVolumeStates(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	calls := mockDriver.GetReconcileCalls()
 	require.Len(t, calls, 3, "expected quota, owner/mode and properties reconcile calls")
@@ -776,7 +776,7 @@ func TestControllerKeyLocationSecret(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	ctrl.reconcileClaims(ctx)
+	ctrl.processPVC(ctx, pvc)
 
 	opts, ok := mockDriver.GetCreateOptions("pool/k8s/media/enc-claim")
 	require.True(t, ok, "expected mock driver create options")

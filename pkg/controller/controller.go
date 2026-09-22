@@ -14,12 +14,19 @@ import (
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes"
+	corelisters "k8s.io/client-go/listers/core/v1"
+	storagelisters "k8s.io/client-go/listers/storage/v1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/client-go/util/workqueue"
 )
 
 // ControllerOptions contains initialization parameters for the provisioner controller.
@@ -30,10 +37,15 @@ type ControllerOptions struct {
 	HostPrefix      string
 	Drivers         map[string]driver.Driver
 	Recorder        record.EventRecorder
-	ResyncPeriod    time.Duration
+	// ResyncPeriod is the informer resync period, acting as a safety net for
+	// missed events. Defaults to 10 minutes.
+	ResyncPeriod time.Duration
+	// Workers is the number of concurrent reconcile workers. Defaults to 4.
+	Workers int
 }
 
-// Controller runs the reconciliation loops for PVC provisioning and PV deletion.
+// Controller watches PVCs, PVs and StorageClasses with informers and
+// reconciles them via an event-driven workqueue.
 type Controller struct {
 	client          kubernetes.Interface
 	nodeName        string
@@ -42,6 +54,13 @@ type Controller struct {
 	drivers         map[string]driver.Driver
 	recorder        record.EventRecorder
 	resyncPeriod    time.Duration
+	workers         int
+
+	pvcLister corelisters.PersistentVolumeClaimLister
+	pvLister  corelisters.PersistentVolumeLister
+	scLister  storagelisters.StorageClassLister
+
+	queue workqueue.TypedRateLimitingInterface[reconcileKey]
 
 	mu         sync.Mutex
 	inProgress map[string]bool
@@ -56,7 +75,10 @@ func NewController(opts ControllerOptions) (*Controller, error) {
 		opts.ProvisionerName = config.DefaultProvisionerName
 	}
 	if opts.ResyncPeriod == 0 {
-		opts.ResyncPeriod = 15 * time.Second
+		opts.ResyncPeriod = 10 * time.Minute
+	}
+	if opts.Workers <= 0 {
+		opts.Workers = 4
 	}
 	if opts.Drivers == nil {
 		opts.Drivers = make(map[string]driver.Driver)
@@ -70,7 +92,12 @@ func NewController(opts ControllerOptions) (*Controller, error) {
 		drivers:         opts.Drivers,
 		recorder:        opts.Recorder,
 		resyncPeriod:    opts.ResyncPeriod,
+		workers:         opts.Workers,
 		inProgress:      make(map[string]bool),
+		queue: workqueue.NewTypedRateLimitingQueueWithConfig(
+			workqueue.DefaultTypedControllerRateLimiter[reconcileKey](),
+			workqueue.TypedRateLimitingQueueConfig[reconcileKey]{Name: "subvol-provisioner"},
+		),
 	}, nil
 }
 
@@ -81,34 +108,251 @@ func (c *Controller) RegisterDriver(d driver.Driver) {
 	c.drivers[d.Name()] = d
 }
 
-// Run starts the controller reconciliation loop until ctx is canceled.
+// reconcileKey identifies an object to reconcile: a PVC ("pvc") or PV ("pv").
+type reconcileKey struct {
+	kind      string
+	namespace string
+	name      string
+}
+
+func (k reconcileKey) String() string {
+	if k.namespace != "" {
+		return fmt.Sprintf("%s:%s/%s", k.kind, k.namespace, k.name)
+	}
+	return fmt.Sprintf("%s:%s", k.kind, k.name)
+}
+
+// Run starts informers and reconcile workers until ctx is canceled.
 func (c *Controller) Run(ctx context.Context) error {
 	log.Info().
 		Str("nodeName", c.nodeName).
 		Str("provisioner", c.provisionerName).
+		Int("workers", c.workers).
+		Dur("resyncPeriod", c.resyncPeriod).
 		Msg("Starting k8s-subvol-provisioner controller")
 
-	ticker := time.NewTicker(c.resyncPeriod)
-	defer ticker.Stop()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
 
-	// Initial reconcile
-	c.reconcileAll(ctx)
+	stopCh := ctx.Done()
+	factory := informers.NewSharedInformerFactory(c.client, c.resyncPeriod)
 
-	for {
-		select {
-		case <-ctx.Done():
-			log.Info().Msg("Shutting down controller")
-			return nil
-		case <-ticker.C:
-			c.reconcileAll(ctx)
+	pvcInformer := factory.Core().V1().PersistentVolumeClaims().Informer()
+	pvInformer := factory.Core().V1().PersistentVolumes().Informer()
+	scInformer := factory.Storage().V1().StorageClasses().Informer()
+
+	c.pvcLister = factory.Core().V1().PersistentVolumeClaims().Lister()
+	c.pvLister = factory.Core().V1().PersistentVolumes().Lister()
+	c.scLister = factory.Storage().V1().StorageClasses().Lister()
+	hasSynced := []cache.InformerSynced{pvcInformer.HasSynced, pvInformer.HasSynced, scInformer.HasSynced}
+
+	pvcInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.onPVCAdd,
+		UpdateFunc: func(_, newObj any) { c.onPVCAdd(newObj) },
+	})
+	pvInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.onPVAdd,
+		UpdateFunc: func(_, newObj any) { c.onPVAdd(newObj) },
+	})
+	scInformer.AddEventHandler(cache.ResourceEventHandlerFuncs{
+		AddFunc:    c.onStorageClassAdd,
+		UpdateFunc: func(_, newObj any) { c.onStorageClassAdd(newObj) },
+	})
+
+	factory.Start(stopCh)
+	if !cache.WaitForCacheSync(stopCh, hasSynced...) {
+		return fmt.Errorf("timed out waiting for informer caches to sync")
+	}
+	log.Info().Msg("Informer caches synced")
+
+	var wg sync.WaitGroup
+	for i := 0; i < c.workers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			c.worker(ctx)
+		}()
+	}
+
+	<-ctx.Done()
+	log.Info().Msg("Shutting down controller")
+	c.queue.ShutDown()
+	wg.Wait()
+	return nil
+}
+
+func (c *Controller) onPVCAdd(obj any) {
+	pvc, ok := obj.(*corev1.PersistentVolumeClaim)
+	if !ok {
+		return
+	}
+	if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+		return
+	}
+	c.queue.Add(reconcileKey{kind: "pvc", namespace: pvc.Namespace, name: pvc.Name})
+}
+
+func (c *Controller) onPVAdd(obj any) {
+	pv, ok := obj.(*corev1.PersistentVolume)
+	if !ok {
+		return
+	}
+	if pv.Annotations[config.AnnProvisionedBy] != c.provisionerName {
+		return
+	}
+	c.queue.Add(reconcileKey{kind: "pv", name: pv.Name})
+}
+
+// onStorageClassAdd re-enqueues PVCs referencing the StorageClass so that
+// provisioner/node targeting changes take effect immediately.
+func (c *Controller) onStorageClassAdd(obj any) {
+	sc, ok := obj.(*storagev1.StorageClass)
+	if !ok || c.pvcLister == nil {
+		return
+	}
+	pvcs, err := c.pvcLister.List(labels.Everything())
+	if err != nil {
+		log.Error().Err(err).Str("storageClass", sc.Name).Msg("Failed to list PVCs for StorageClass event")
+		return
+	}
+	for _, pvc := range pvcs {
+		if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName != sc.Name {
+			continue
 		}
+		c.queue.Add(reconcileKey{kind: "pvc", namespace: pvc.Namespace, name: pvc.Name})
 	}
 }
 
-func (c *Controller) reconcileAll(ctx context.Context) {
-	c.reconcileClaims(ctx)
-	c.reconcileVolumeStates(ctx)
-	c.reconcileVolumes(ctx)
+func (c *Controller) worker(ctx context.Context) {
+	for c.processNextWorkItem(ctx) {
+	}
+}
+
+func (c *Controller) processNextWorkItem(ctx context.Context) bool {
+	key, shutdown := c.queue.Get()
+	if shutdown {
+		return false
+	}
+	defer c.queue.Done(key)
+
+	err := c.reconcile(ctx, key)
+	if err == nil {
+		c.queue.Forget(key)
+		return true
+	}
+	if c.queue.NumRequeues(key) < maxRetries {
+		log.Error().Err(err).Str("key", key.String()).Msg("Reconcile failed, retrying")
+		c.queue.AddRateLimited(key)
+		return true
+	}
+	log.Error().Err(err).Str("key", key.String()).Int("maxRetries", maxRetries).Msg("Reconcile failed, giving up")
+	c.queue.Forget(key)
+	return true
+}
+
+// maxRetries is the maximum number of rate-limited retries per object before
+// giving up and waiting for the next informer resync.
+const maxRetries = 5
+
+func (c *Controller) reconcile(ctx context.Context, key reconcileKey) error {
+	switch key.kind {
+	case "pvc":
+		pvc, err := c.getPVC(ctx, key.namespace, key.name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get PVC %s: %w", key.String(), err)
+		}
+		return c.processPVC(ctx, pvc)
+	case "pv":
+		pv, err := c.getPV(ctx, key.name)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get PV %s: %w", key.String(), err)
+		}
+		return c.processPV(ctx, pv)
+	default:
+		return fmt.Errorf("unknown reconcile kind %q", key.kind)
+	}
+}
+
+// processPVC reconciles a single PVC: pending PVCs are provisioned, bound
+// PVCs get their annotation-driven state reconciled onto the dataset.
+func (c *Controller) processPVC(ctx context.Context, pvc *corev1.PersistentVolumeClaim) error {
+	if pvc.Status.Phase == corev1.ClaimPending && pvc.Spec.VolumeName == "" {
+		if pvc.Spec.StorageClassName == nil || *pvc.Spec.StorageClassName == "" {
+			return nil
+		}
+		sc, err := c.getStorageClass(ctx, *pvc.Spec.StorageClassName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get StorageClass %q: %w", *pvc.Spec.StorageClassName, err)
+		}
+		if sc.Provisioner != c.provisionerName || !c.isNodeTargeted(sc, pvc) {
+			return nil
+		}
+		return c.reconcileClaim(ctx, pvc, sc)
+	}
+
+	if pvc.Status.Phase == corev1.ClaimBound && pvc.Spec.VolumeName != "" {
+		pv, err := c.getPV(ctx, pvc.Spec.VolumeName)
+		if err != nil {
+			if apierrors.IsNotFound(err) {
+				return nil
+			}
+			return fmt.Errorf("failed to get PV %q: %w", pvc.Spec.VolumeName, err)
+		}
+		if pv.Annotations[config.AnnProvisionedBy] != c.provisionerName || !c.isPVOnThisNode(pv) {
+			return nil
+		}
+		return c.reconcileVolumeState(ctx, pvc, pv)
+	}
+
+	return nil
+}
+
+// processPV reconciles a single PV: Released PVs with the Delete reclaim
+// policy provisioned by this provisioner are destroyed.
+func (c *Controller) processPV(ctx context.Context, pv *corev1.PersistentVolume) error {
+	if pv.Annotations[config.AnnProvisionedBy] != c.provisionerName {
+		return nil
+	}
+	if pv.Status.Phase != corev1.VolumeReleased {
+		return nil
+	}
+	if pv.Spec.PersistentVolumeReclaimPolicy != corev1.PersistentVolumeReclaimDelete {
+		return nil
+	}
+	if !c.isPVOnThisNode(pv) {
+		return nil
+	}
+	return c.reconcileVolumeDelete(ctx, pv)
+}
+
+func (c *Controller) getPVC(ctx context.Context, namespace, name string) (*corev1.PersistentVolumeClaim, error) {
+	if c.pvcLister != nil {
+		return c.pvcLister.PersistentVolumeClaims(namespace).Get(name)
+	}
+	return c.client.CoreV1().PersistentVolumeClaims(namespace).Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Controller) getPV(ctx context.Context, name string) (*corev1.PersistentVolume, error) {
+	if c.pvLister != nil {
+		return c.pvLister.Get(name)
+	}
+	return c.client.CoreV1().PersistentVolumes().Get(ctx, name, metav1.GetOptions{})
+}
+
+func (c *Controller) getStorageClass(ctx context.Context, name string) (*storagev1.StorageClass, error) {
+	if c.scLister != nil {
+		return c.scLister.Get(name)
+	}
+	return c.client.StorageV1().StorageClasses().Get(ctx, name, metav1.GetOptions{})
 }
 
 // ReconcileClaims finds Pending PVCs targeted for this provisioner and node, and provisions them.
@@ -171,12 +415,12 @@ func (c *Controller) isNodeTargeted(sc *storagev1.StorageClass, pvc *corev1.Pers
 	return true
 }
 
-func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentVolumeClaim, sc *storagev1.StorageClass) {
+func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentVolumeClaim, sc *storagev1.StorageClass) error {
 	key := fmt.Sprintf("pvc:%s/%s", pvc.Namespace, pvc.Name)
 	c.mu.Lock()
 	if c.inProgress[key] {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 	c.inProgress[key] = true
 	c.mu.Unlock()
@@ -196,7 +440,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	if !ok {
 		log.Error().Str("driver", driverName).Str("pvc", pvc.Name).Msg("Driver not found")
 		c.emitEvent(pvc, corev1.EventTypeWarning, "DriverNotFound", fmt.Sprintf("Storage driver %q is not registered", driverName))
-		return
+		return fmt.Errorf("storage driver %q is not registered", driverName)
 	}
 
 	// Calculate subvolume/dataset path
@@ -208,7 +452,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		if err != nil {
 			log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to evaluate path template")
 			c.emitEvent(pvc, corev1.EventTypeWarning, "TemplateError", err.Error())
-			return
+			return fmt.Errorf("failed to evaluate path template: %w", err)
 		}
 	}
 
@@ -230,7 +474,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	if err != nil {
 		log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to resolve quota")
 		c.emitEvent(pvc, corev1.EventTypeWarning, "QuotaResolutionFailed", err.Error())
-		return
+		return err
 	}
 	var quotaBytes int64
 	if quotaPtr != nil {
@@ -271,7 +515,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		if err != nil {
 			log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to load keylocation secret")
 			c.emitEvent(pvc, corev1.EventTypeWarning, "SecretLoadFailed", err.Error())
-			return
+			return err
 		}
 		if loc := strings.TrimSpace(string(data)); loc != "" {
 			encConfig.Enabled = true
@@ -287,7 +531,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		if err != nil {
 			log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to load encryption secret")
 			c.emitEvent(pvc, corev1.EventTypeWarning, "SecretLoadFailed", err.Error())
-			return
+			return err
 		}
 		encConfig.Enabled = true
 		encConfig.KeyData = keyData
@@ -312,7 +556,7 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	if err != nil {
 		log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to provision volume")
 		c.emitEvent(pvc, corev1.EventTypeWarning, "ProvisioningFailed", err.Error())
-		return
+		return err
 	}
 
 	if adoptExisting {
@@ -346,18 +590,19 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 	if err != nil {
 		log.Error().Err(err).Msg("Failed to build PV object")
 		c.emitEvent(pvc, corev1.EventTypeWarning, "PVBuildFailed", err.Error())
-		return
+		return err
 	}
 
 	createdPV, err := c.client.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
 	if err != nil {
 		log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to create PV in API")
 		c.emitEvent(pvc, corev1.EventTypeWarning, "PVCreateFailed", err.Error())
-		return
+		return err
 	}
 
 	log.Info().Str("pv", createdPV.Name).Str("pvc", pvc.Name).Msg("Successfully provisioned and created PV")
 	c.emitEvent(pvc, corev1.EventTypeNormal, "ProvisioningSucceeded", fmt.Sprintf("Successfully provisioned volume %s", createdPV.Name))
+	return nil
 }
 
 // ReconcileVolumes finds Released PVs with Delete policy provisioned by this provisioner, and destroys them.
@@ -409,12 +654,12 @@ func (c *Controller) isPVOnThisNode(pv *corev1.PersistentVolume) bool {
 	return false
 }
 
-func (c *Controller) reconcileVolumeDelete(ctx context.Context, pv *corev1.PersistentVolume) {
+func (c *Controller) reconcileVolumeDelete(ctx context.Context, pv *corev1.PersistentVolume) error {
 	key := fmt.Sprintf("pv:%s", pv.Name)
 	c.mu.Lock()
 	if c.inProgress[key] {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 	c.inProgress[key] = true
 	c.mu.Unlock()
@@ -429,7 +674,7 @@ func (c *Controller) reconcileVolumeDelete(ctx context.Context, pv *corev1.Persi
 	d, ok := c.drivers[driverName]
 	if !ok {
 		log.Error().Str("driver", driverName).Str("pv", pv.Name).Msg("Driver not found for PV deletion")
-		return
+		return fmt.Errorf("driver %q not found for PV deletion", driverName)
 	}
 
 	datasetName := pv.Annotations[config.AnnDatasetName]
@@ -446,17 +691,18 @@ func (c *Controller) reconcileVolumeDelete(ctx context.Context, pv *corev1.Persi
 	if err != nil {
 		log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to delete volume in backend")
 		c.emitEvent(pv, corev1.EventTypeWarning, "DeletingFailed", err.Error())
-		return
+		return err
 	}
 
 	// Delete the PV from Kubernetes
 	if err := c.client.CoreV1().PersistentVolumes().Delete(ctx, pv.Name, metav1.DeleteOptions{}); err != nil {
 		log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to delete PV object from K8s")
 		c.emitEvent(pv, corev1.EventTypeWarning, "PVDeleteFailed", err.Error())
-		return
+		return err
 	}
 
 	log.Info().Str("pv", pv.Name).Msg("Successfully deleted PV object and backend dataset")
+	return nil
 }
 
 // loadSecretKey parses "namespace/name#key" and fetches the key from K8s Secret.
@@ -523,47 +769,12 @@ func resolveQuota(pvc *corev1.PersistentVolumeClaim) (*int64, error) {
 	return nil, nil
 }
 
-// reconcileVolumeStates reconciles annotation-driven config (quota, owner,
-// mode, properties) onto the backend datasets of already-bound PVCs.
-//
-// By default changes are only *planned*: the controller computes the delta and
-// emits a VolumeDryRun event without touching the dataset. Changes are applied
-// only when the StorageClass opts in via the `autoApply` parameter, or the PVC
-// carries a one-shot subvol.io/apply annotation (removed after applying). The
-// subvol.io/dry-run annotation always forces plan-only. Initial provisioning
-// (creating a volume for a new PVC) is never gated by this policy.
-func (c *Controller) reconcileVolumeStates(ctx context.Context) {
-	pvcs, err := c.client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
-	if err != nil {
-		log.Error().Err(err).Msg("Failed to list PVCs for state reconciliation")
-		return
-	}
-
-	for i := range pvcs.Items {
-		pvc := &pvcs.Items[i]
-		if pvc.Status.Phase != corev1.ClaimBound || pvc.Spec.VolumeName == "" {
-			continue
-		}
-		pv, err := c.client.CoreV1().PersistentVolumes().Get(ctx, pvc.Spec.VolumeName, metav1.GetOptions{})
-		if err != nil {
-			continue
-		}
-		if pv.Annotations[config.AnnProvisionedBy] != c.provisionerName {
-			continue
-		}
-		if !c.isPVOnThisNode(pv) {
-			continue
-		}
-		c.reconcileVolumeState(ctx, pvc, pv)
-	}
-}
-
-func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) {
+func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.PersistentVolumeClaim, pv *corev1.PersistentVolume) error {
 	key := fmt.Sprintf("state:%s/%s", pvc.Namespace, pvc.Name)
 	c.mu.Lock()
 	if c.inProgress[key] {
 		c.mu.Unlock()
-		return
+		return nil
 	}
 	c.inProgress[key] = true
 	c.mu.Unlock()
@@ -576,17 +787,17 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 
 	d, ok := c.drivers[pv.Annotations[config.AnnSubvolDriver]]
 	if !ok {
-		return
+		return nil
 	}
 	rec, ok := d.(driver.Reconciler)
 	if !ok {
 		log.Debug().Str("driver", d.Name()).Msg("Driver does not support live reconciliation, skipping")
-		return
+		return nil
 	}
 
 	datasetName := pv.Annotations[config.AnnDatasetName]
 	if datasetName == "" {
-		return
+		return nil
 	}
 	mountPath := pv.Annotations[config.AnnHostMountPath]
 
@@ -615,7 +826,7 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 	quota, err := resolveQuota(pvc)
 	if err != nil {
 		fail(err, "resolve quota")
-		return
+		return err
 	}
 	qc, err := rec.ReconcileQuota(ctx, datasetName, quota, runDryRun)
 	if err != nil {
@@ -672,13 +883,13 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 	}
 
 	if len(changes) == 0 {
-		return
+		return nil
 	}
 	summary := strings.Join(changes, ", ")
 	if !apply {
 		log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("DRY RUN: planned volume changes (annotate with subvol.io/apply to authorize)")
 		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeDryRun", fmt.Sprintf("Dry run: would apply: %s (annotate with %s to apply)", summary, config.AnnApply))
-		return
+		return nil
 	}
 	log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("Reconciled volume state")
 	c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeUpdated", fmt.Sprintf("Applied: %s", summary))
@@ -691,6 +902,8 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 		if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Patch(ctx, pvc.Name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
 			log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to remove apply annotation")
 			c.emitEvent(pvc, corev1.EventTypeWarning, "ApplyAnnotationCleanupFailed", fmt.Sprintf("Applied changes but failed to remove %s annotation: %v", config.AnnApply, err))
+			return err
 		}
 	}
+	return nil
 }
