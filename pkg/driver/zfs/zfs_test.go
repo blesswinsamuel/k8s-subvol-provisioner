@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"io/fs"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 
 	"github.com/blesswinsamuel/k8s-subvol-provisioner/pkg/apis/config"
@@ -391,5 +393,81 @@ func TestZFSReconcileOwnerMode(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.Empty(t, changes)
+	})
+}
+
+func TestZFSReconcileOwnerModeRecursive(t *testing.T) {
+	dir := t.TempDir()
+	sub := filepath.Join(dir, "sub")
+	require.NoError(t, os.MkdirAll(sub, 0755))
+	file := filepath.Join(sub, "data.txt")
+	require.NoError(t, os.WriteFile(file, []byte("x"), 0644))
+
+	t.Run("recursive chmod applies to differing paths and reports counts", func(t *testing.T) {
+		d := New(WithExecutor(newRecordExecutor()))
+		mode := os.FileMode(0770)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: dir,
+			Mode:      &mode,
+			Recursive: true,
+		})
+		require.NoError(t, err)
+		// Root dir is 0755; sub and file differ.
+		assert.ElementsMatch(t, []string{"mode=0755→0770", "mode recursive: 2 paths"}, changes)
+
+		for _, p := range []string{sub, file} {
+			fi, err := os.Stat(p)
+			require.NoError(t, err)
+			assert.Equal(t, fs.FileMode(0770).Perm(), fi.Mode().Perm(), "path %s must be re-chmodded", p)
+		}
+	})
+
+	t.Run("no-op when everything matches", func(t *testing.T) {
+		d := New(WithExecutor(newRecordExecutor()))
+		mode := os.FileMode(0770)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: dir,
+			Mode:      &mode,
+			Recursive: true,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+
+	t.Run("owner dry run counts without applying", func(t *testing.T) {
+		d := New(WithExecutor(newRecordExecutor()))
+		owner := &config.Ownership{UID: int64(os.Getuid() + 1), GID: int64(os.Getgid())}
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: dir,
+			Owner:     owner,
+			Recursive: true,
+			DryRun:    true,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{fmt.Sprintf("owner=%d:%d→%d:%d", os.Getuid(), os.Getgid(), os.Getuid()+1, os.Getgid()), "owner recursive: 2 paths"}, changes)
+
+		for _, p := range []string{sub, file} {
+			fi, err := os.Stat(p)
+			require.NoError(t, err)
+			if stat, ok := fi.Sys().(*syscall.Stat_t); ok {
+				assert.Equal(t, uint32(os.Getuid()), stat.Uid, "dry run must not chown %s", p)
+			}
+		}
+	})
+
+	t.Run("symlinks are skipped", func(t *testing.T) {
+		require.NoError(t, os.Symlink("/nonexistent-target", filepath.Join(dir, "dangling")))
+		d := New(WithExecutor(newRecordExecutor()))
+		mode := os.FileMode(0770)
+		_, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "tank/k8s/pvc",
+			MountPath: dir,
+			Mode:      &mode,
+			Recursive: true,
+		})
+		require.NoError(t, err)
 	})
 }

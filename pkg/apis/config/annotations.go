@@ -11,6 +11,7 @@ const (
 	AnnSubvolPath           = "subvol.io/subvol"                 // Custom subvolume/dataset name override (relative to parent)
 	AnnOwner                = "subvol.io/owner"                  // "UID:GID" e.g. "1000:1000"
 	AnnMode                 = "subvol.io/mode"                   // Directory permissions e.g. "0750"
+	AnnRecursive            = "subvol.io/recursive"              // "true" to apply owner/mode reconciliation recursively to all files and directories under the dataset (symlinks are skipped)
 	AnnKeyLocation          = "subvol.io/key-location"           // Encryption key location override (e.g. "http://vault:8200/..." or "file:///...")
 	AnnSecretKeyRef         = "subvol.io/secret-key-ref"         // Reference to K8s secret containing key: "namespace/name#key"
 	AnnSnapshotBeforeDelete = "subvol.io/snapshot-before-delete" // "true" to preserve the volume before deletion (rename or snapshot depending on backend)

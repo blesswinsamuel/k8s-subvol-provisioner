@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -298,6 +299,19 @@ func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOp
 			changes = append(changes, change)
 		}
 	}
+
+	if opts.Recursive {
+		reowned, rechmod, err := d.reconcileOwnerModeRecursive(ctx, path, opts)
+		if err != nil {
+			return nil, err
+		}
+		if reowned > 0 {
+			changes = append(changes, fmt.Sprintf("owner recursive: %d paths", reowned))
+		}
+		if rechmod > 0 {
+			changes = append(changes, fmt.Sprintf("mode recursive: %d paths", rechmod))
+		}
+	}
 	return changes, nil
 }
 
@@ -401,6 +415,50 @@ func (d *Driver) ReconcileProperties(ctx context.Context, name string, props map
 	}
 
 	return changes, nil
+}
+
+// reconcileOwnerModeRecursive walks the dataset mountpoint and applies the
+// desired owner/mode to every file and directory whose ownership or
+// permissions differ. Symlinks are skipped and never followed. Returns the
+// number of paths that were (or in dry-run, would be) re-owned and re-chmodded.
+func (d *Driver) reconcileOwnerModeRecursive(ctx context.Context, root string, opts driver.OwnerModeOptions) (reowned int, rechmod int, err error) {
+	walkErr := filepath.WalkDir(root, func(p string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == root || entry.Type()&fs.ModeSymlink != 0 {
+			return nil // root is handled by the caller; never follow symlinks
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return fmt.Errorf("failed to stat %q: %w", p, err)
+		}
+		if opts.Owner != nil {
+			if stat, ok := info.Sys().(*syscall.Stat_t); ok && (stat.Uid != uint32(opts.Owner.UID) || stat.Gid != uint32(opts.Owner.GID)) {
+				if !opts.DryRun {
+					if err := os.Chown(p, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
+						return fmt.Errorf("failed to chown %q: %w", p, err)
+					}
+				}
+				reowned++
+			}
+		}
+		if opts.Mode != nil {
+			if want := opts.Mode.Perm(); info.Mode().Perm() != want {
+				if !opts.DryRun {
+					if err := os.Chmod(p, want); err != nil {
+						return fmt.Errorf("failed to chmod %q: %w", p, err)
+					}
+				}
+				rechmod++
+			}
+		}
+		return nil
+	})
+	if walkErr != nil {
+		return 0, 0, fmt.Errorf("failed recursive owner/mode reconciliation under %q: %w", root, walkErr)
+	}
+	return reowned, rechmod, nil
 }
 
 // runZfsSet applies a single property via `zfs set`, or only logs the planned

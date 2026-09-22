@@ -845,6 +845,7 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 		HostPrefix: c.hostPrefix,
 		Owner:      owner,
 		Mode:       mode,
+		Recursive:  pvc.Annotations[config.AnnRecursive] == "true",
 		DryRun:     runDryRun,
 	})
 	if err != nil {

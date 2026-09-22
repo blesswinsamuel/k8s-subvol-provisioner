@@ -43,7 +43,10 @@ type OwnerModeOptions struct {
 	HostPrefix string
 	Owner      *config.Ownership
 	Mode       *os.FileMode
-	DryRun     bool
+	// Recursive applies owner/mode changes to all files and directories under
+	// the mountpoint (symlinks are skipped, never followed).
+	Recursive bool
+	DryRun    bool
 }
 
 // Reconciler is an optional interface for drivers that support reconciling

@@ -67,6 +67,7 @@ When a `PersistentVolumeClaim` is submitted:
 | `subvol.io/subvol` | Overrides the dataset/subvolume relative path instead of evaluating `pathTemplate`. |
 | `subvol.io/owner` | Explicit `UID:GID` ownership (e.g. `1000:1000`). |
 | `subvol.io/mode` | Explicit permission mode bits (e.g. `0770`). |
+| `subvol.io/recursive` | When `"true"`, live owner/mode reconciliation applies to all files and directories under the dataset (symlinks are skipped, never followed). Change summaries report affected path counts, e.g. `owner recursive: 42 paths`. Without it only the dataset root is adjusted. |
 | `subvol.io/key-location` | HTTP/HTTPS or local key location for ZFS encryption. |
 | `subvol.io/secret-key-ref` | Reference to a Kubernetes secret containing the key (`namespace/secret#key`). |
 | `subvol.io/snapshot-before-delete` | When set to `"true"` and reclaim policy is `Delete`, preserves the volume's data before deletion: ZFS and the directory backend rename the dataset/directory to a sibling `<name>-deleted-<timestamp>`, Btrfs creates a read-only sibling snapshot. If preservation fails, deletion proceeds. |
@@ -103,8 +104,8 @@ Reconciled per bound PVC of this provisioner (ZFS driver):
 | Config | Source | Live updates |
 | :--- | :--- | :--- |
 | Quota | `subvol.io/quota` annotation → `requests.storage` (unless it equals `1`, the dummy "unmanaged" value) → no quota | Yes (set/diff, `quota=none` when unmanaged) |
-| Owner | `subvol.io/owner` annotation (absent = not reconciled) | Yes (chown of the mountpoint) |
-| Mode | `subvol.io/mode` annotation (absent = not reconciled) | Yes (chmod) |
+| Owner | `subvol.io/owner` annotation (absent = not reconciled) | Yes (chown of the mountpoint; `subvol.io/recursive: "true"` walks the whole dataset) |
+| Mode | `subvol.io/mode` annotation (absent = not reconciled) | Yes (chmod; `subvol.io/recursive: "true"` walks the whole dataset) |
 | Properties | StorageClass `properties` overlaid by `subvol.io/properties` | Yes: changed properties are set; locally-set properties removed from the desired set are reset via `zfs inherit` |
 | Encryption, path/dataset name | — | Provision-time only; never reconciled |
 
