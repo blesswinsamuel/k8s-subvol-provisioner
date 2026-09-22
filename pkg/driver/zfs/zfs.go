@@ -218,29 +218,6 @@ func parseZFSQuota(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
-// formatZFSBytes renders a byte count the way zfs prints human-readable
-// sizes (1024-based suffixes); 0 renders as "none".
-func formatZFSBytes(v int64) string {
-	if v <= 0 {
-		return "none"
-	}
-	const unit = 1024
-	if v < unit {
-		return fmt.Sprintf("%d", v)
-	}
-	div, exp := int64(unit), 0
-	for n := v / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	suffix := "KMGTPE"[exp]
-	f := float64(v) / float64(div)
-	if f >= 10 {
-		return fmt.Sprintf("%.0f%c", f, suffix)
-	}
-	return fmt.Sprintf("%.1f%c", f, suffix)
-}
-
 func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
 	// -p renders the quota in parsable bytes; without it zfs prints
 	// human-readable values (e.g. "1G", "2.10G") that cannot be compared.
@@ -260,7 +237,7 @@ func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *in
 		if err := d.runZfsSet(ctx, dryRun, name, "quota=none"); err != nil {
 			return nil, fmt.Errorf("failed to unset quota of zfs dataset %q: %w", name, err)
 		}
-		return []string{fmt.Sprintf("quota=%s→none", formatZFSBytes(current))}, nil
+		return []string{fmt.Sprintf("quota=%d→none", current)}, nil
 	}
 	if current == *quotaBytes {
 		return nil, nil
@@ -268,7 +245,7 @@ func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *in
 	if err := d.runZfsSet(ctx, dryRun, name, fmt.Sprintf("quota=%d", *quotaBytes)); err != nil {
 		return nil, fmt.Errorf("failed to set quota of zfs dataset %q to %d: %w", name, *quotaBytes, err)
 	}
-	return []string{fmt.Sprintf("quota=%s→%s", formatZFSBytes(current), formatZFSBytes(*quotaBytes))}, nil
+	return []string{fmt.Sprintf("quota=%d→%d", current, *quotaBytes)}, nil
 }
 
 func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOptions) ([]string, error) {

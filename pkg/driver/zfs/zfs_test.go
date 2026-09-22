@@ -230,7 +230,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, false)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"quota=5.0G→10G"}, changes)
+		assert.Equal(t, []string{"quota=5368709120→10737418240"}, changes)
 		assert.Contains(t, exec.commands, []string{"zfs", "set", fmt.Sprintf("quota=%d", quota), "tank/k8s/pvc"})
 	})
 
@@ -252,7 +252,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", nil, false)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"quota=10G→none"}, changes)
+		assert.Equal(t, []string{"quota=10737418240→none"}, changes)
 		assert.Contains(t, exec.commands, []string{"zfs", "set", "quota=none", "tank/k8s/pvc"})
 	})
 
@@ -274,7 +274,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, true)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"quota=5.0G→10G"}, changes)
+		assert.Equal(t, []string{"quota=5368709120→10737418240"}, changes)
 		for _, cmd := range exec.commands {
 			if len(cmd) >= 2 && cmd[1] == "set" {
 				t.Errorf("unexpected zfs set during dry run: %v", cmd)
