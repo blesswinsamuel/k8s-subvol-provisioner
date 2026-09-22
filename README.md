@@ -94,7 +94,9 @@ When a `PersistentVolumeClaim` is submitted:
 > StorageClass sets the `autoApply: "true"` parameter. The
 > `subvol.io/dry-run: "true"` annotation always forces plan-only. Initial
 > provisioning (creating the volume for a new PVC) is never gated by this
-> policy.
+> policy. Planned and applied change summaries show the transition, e.g.
+> `quota=1G→5G`, `owner=1000:1000→0:0`, `mode=0755→0750`, `compression=off→lz4`,
+> `subvol.io:foo=bar→inherit`.
 
 Reconciled per bound PVC of this provisioner (ZFS driver):
 

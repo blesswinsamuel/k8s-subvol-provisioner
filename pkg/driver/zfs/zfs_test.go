@@ -230,7 +230,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, false)
 		require.NoError(t, err)
-		assert.Equal(t, []string{fmt.Sprintf("quota=%d", quota)}, changes)
+		assert.Equal(t, []string{"quota=5.0G→10G"}, changes)
 		assert.Contains(t, exec.commands, []string{"zfs", "set", fmt.Sprintf("quota=%d", quota), "tank/k8s/pvc"})
 	})
 
@@ -252,7 +252,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", nil, false)
 		require.NoError(t, err)
-		assert.Equal(t, []string{"quota=none"}, changes)
+		assert.Equal(t, []string{"quota=10G→none"}, changes)
 		assert.Contains(t, exec.commands, []string{"zfs", "set", "quota=none", "tank/k8s/pvc"})
 	})
 
@@ -274,7 +274,7 @@ func TestZFSReconcileQuota(t *testing.T) {
 		d := New(WithExecutor(exec))
 		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &quota, true)
 		require.NoError(t, err)
-		assert.Equal(t, []string{fmt.Sprintf("quota=%d", quota)}, changes)
+		assert.Equal(t, []string{"quota=5.0G→10G"}, changes)
 		for _, cmd := range exec.commands {
 			if len(cmd) >= 2 && cmd[1] == "set" {
 				t.Errorf("unexpected zfs set during dry run: %v", cmd)
@@ -298,7 +298,7 @@ func TestZFSReconcileProperties(t *testing.T) {
 			"atime":       "off",
 		}, false)
 		require.NoError(t, err)
-		assert.ElementsMatch(t, []string{"compression=lz4", "atime=off", "subvol.io:custom=inherited"}, changes)
+		assert.ElementsMatch(t, []string{"compression=off→lz4", "atime=on→off", "subvol.io:custom=bar→inherit"}, changes)
 	})
 
 	t.Run("skips non-reconcilable properties", func(t *testing.T) {
@@ -374,7 +374,7 @@ func TestZFSReconcileOwnerMode(t *testing.T) {
 			Mode:      &mode,
 		})
 		require.NoError(t, err)
-		assert.Equal(t, []string{"mode=0750"}, changes)
+		assert.Equal(t, []string{"mode=0755→0750"}, changes)
 
 		fi, err := os.Stat(dir)
 		require.NoError(t, err)

@@ -218,6 +218,29 @@ func parseZFSQuota(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
+// formatZFSBytes renders a byte count the way zfs prints human-readable
+// sizes (1024-based suffixes); 0 renders as "none".
+func formatZFSBytes(v int64) string {
+	if v <= 0 {
+		return "none"
+	}
+	const unit = 1024
+	if v < unit {
+		return fmt.Sprintf("%d", v)
+	}
+	div, exp := int64(unit), 0
+	for n := v / unit; n >= unit; n /= unit {
+		div *= unit
+		exp++
+	}
+	suffix := "KMGTPE"[exp]
+	f := float64(v) / float64(div)
+	if f >= 10 {
+		return fmt.Sprintf("%.0f%c", f, suffix)
+	}
+	return fmt.Sprintf("%.1f%c", f, suffix)
+}
+
 func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
 	// -p renders the quota in parsable bytes; without it zfs prints
 	// human-readable values (e.g. "1G", "2.10G") that cannot be compared.
@@ -237,7 +260,7 @@ func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *in
 		if err := d.runZfsSet(ctx, dryRun, name, "quota=none"); err != nil {
 			return nil, fmt.Errorf("failed to unset quota of zfs dataset %q: %w", name, err)
 		}
-		return []string{"quota=none"}, nil
+		return []string{fmt.Sprintf("quota=%s→none", formatZFSBytes(current))}, nil
 	}
 	if current == *quotaBytes {
 		return nil, nil
@@ -245,7 +268,7 @@ func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *in
 	if err := d.runZfsSet(ctx, dryRun, name, fmt.Sprintf("quota=%d", *quotaBytes)); err != nil {
 		return nil, fmt.Errorf("failed to set quota of zfs dataset %q to %d: %w", name, *quotaBytes, err)
 	}
-	return []string{fmt.Sprintf("quota=%d", *quotaBytes)}, nil
+	return []string{fmt.Sprintf("quota=%s→%s", formatZFSBytes(current), formatZFSBytes(*quotaBytes))}, nil
 }
 
 func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOptions) ([]string, error) {
@@ -272,7 +295,7 @@ func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOp
 	if opts.Owner != nil {
 		if fi.Sys() != nil {
 			if stat, ok := fi.Sys().(*syscall.Stat_t); ok && (stat.Uid != uint32(opts.Owner.UID) || stat.Gid != uint32(opts.Owner.GID)) {
-				change := fmt.Sprintf("owner=%d:%d", opts.Owner.UID, opts.Owner.GID)
+				change := fmt.Sprintf("owner=%d:%d→%d:%d", stat.Uid, stat.Gid, opts.Owner.UID, opts.Owner.GID)
 				if !opts.DryRun {
 					if err := os.Chown(path, int(opts.Owner.UID), int(opts.Owner.GID)); err != nil {
 						return nil, fmt.Errorf("failed to chown %q: %w", path, err)
@@ -287,7 +310,7 @@ func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOp
 	if opts.Mode != nil {
 		want := opts.Mode.Perm()
 		if fi.Mode().Perm() != want {
-			change := fmt.Sprintf("mode=%04o", want)
+			change := fmt.Sprintf("mode=%04o→%04o", fi.Mode().Perm(), want)
 			if !opts.DryRun {
 				if err := os.Chmod(path, want); err != nil {
 					return nil, fmt.Errorf("failed to chmod %q: %w", path, err)
@@ -376,7 +399,11 @@ func (d *Driver) ReconcileProperties(ctx context.Context, name string, props map
 		if err := d.runZfsSet(ctx, dryRun, name, fmt.Sprintf("%s=%s", k, v)); err != nil {
 			return nil, fmt.Errorf("failed to set zfs property %q on %q: %w", k, name, err)
 		}
-		changes = append(changes, fmt.Sprintf("%s=%s", k, v))
+		if !ok {
+			changes = append(changes, fmt.Sprintf("%s→%s", k, v))
+		} else {
+			changes = append(changes, fmt.Sprintf("%s=%s→%s", k, cur.Value, v))
+		}
 	}
 
 	// Remove locally-set properties that are no longer desired.
@@ -393,7 +420,7 @@ func (d *Driver) ReconcileProperties(ctx context.Context, name string, props map
 		if err := d.runZfsInherit(ctx, dryRun, name, k); err != nil {
 			return nil, fmt.Errorf("failed to inherit zfs property %q on %q: %w", k, name, err)
 		}
-		changes = append(changes, fmt.Sprintf("%s=inherited", k))
+		changes = append(changes, fmt.Sprintf("%s=%s→inherit", k, cur.Value))
 	}
 
 	return changes, nil
