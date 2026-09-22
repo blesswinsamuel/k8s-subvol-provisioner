@@ -218,6 +218,18 @@ func parseZFSQuota(s string) (int64, error) {
 	return strconv.ParseInt(s, 10, 64)
 }
 
+// quotaRoundingTolerance absorbs byte-level rounding differences between
+// zfs (truncates fractional sizes) and Kubernetes quantity parsing (rounds
+// fractional sizes up). At most 1 byte apart for any fractional value.
+const quotaRoundingTolerance = int64(1)
+
+func abs(v int64) int64 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
 func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
 	// -p renders the quota in parsable bytes; without it zfs prints
 	// human-readable values (e.g. "1G", "2.10G") that cannot be compared.
@@ -240,6 +252,13 @@ func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *in
 		return []string{fmt.Sprintf("quota=%d→none", current)}, nil
 	}
 	if current == *quotaBytes {
+		return nil, nil
+	}
+	// Kubernetes quantity parsing rounds fractional sizes (e.g. 2.10Gi) up
+	// while zfs truncates, so the two can differ by a single byte and would
+	// otherwise plan a spurious adjustment on every resync. Tolerate byte-
+	// level rounding differences; they are immaterial and non-converging.
+	if abs(*quotaBytes-current) <= quotaRoundingTolerance {
 		return nil, nil
 	}
 	if err := d.runZfsSet(ctx, dryRun, name, fmt.Sprintf("quota=%d", *quotaBytes)); err != nil {

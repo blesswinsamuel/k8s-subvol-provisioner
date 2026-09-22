@@ -103,8 +103,8 @@ Reconciled per bound PVC of this provisioner (ZFS driver):
 | Config | Source | Live updates |
 | :--- | :--- | :--- |
 | Quota | `subvol.io/quota` annotation → `requests.storage` (unless it equals `1`, the dummy "unmanaged" value) → no quota | Yes (set/diff, `quota=none` when unmanaged) |
-| Owner | `subvol.io/owner` → StorageClass `defaultOwner` → none | Yes (chown of the mountpoint) |
-| Mode | `subvol.io/mode` → StorageClass `defaultMode` → none | Yes (chmod) |
+| Owner | `subvol.io/owner` annotation (absent = not reconciled) | Yes (chown of the mountpoint) |
+| Mode | `subvol.io/mode` annotation (absent = not reconciled) | Yes (chmod) |
 | Properties | StorageClass `properties` overlaid by `subvol.io/properties` | Yes: changed properties are set; locally-set properties removed from the desired set are reset via `zfs inherit` |
 | Encryption, path/dataset name | — | Provision-time only; never reconciled |
 

@@ -3,7 +3,6 @@ package controller
 import (
 	"context"
 	"fmt"
-	"os"
 	"path"
 	"strings"
 	"sync"
@@ -835,22 +834,11 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 		changes = append(changes, qc...)
 	}
 
-	// Owner/mode: PVC annotation -> StorageClass default.
-	var owner *config.Ownership
-	var mode *os.FileMode
-	var ownerStr, modeStr string
-	if sc != nil {
-		ownerStr = sc.Parameters[config.ParamDefaultOwner]
-		modeStr = sc.Parameters[config.ParamDefaultMode]
-	}
-	if s := pvc.Annotations[config.AnnOwner]; s != "" {
-		ownerStr = s
-	}
-	if s := pvc.Annotations[config.AnnMode]; s != "" {
-		modeStr = s
-	}
-	owner, _ = config.ParseOwnership(ownerStr)
-	mode, _ = config.ParseFileMode(modeStr)
+	// Owner/mode: only PVC annotations are reconciled. StorageClass
+	// defaultOwner/defaultMode are provision-time defaults — enforcing them
+	// live would chown/chmod historical datasets that never declared them.
+	owner, _ := config.ParseOwnership(pvc.Annotations[config.AnnOwner])
+	mode, _ := config.ParseFileMode(pvc.Annotations[config.AnnMode])
 	oc, err := rec.ReconcileOwnerMode(ctx, driver.OwnerModeOptions{
 		Name:       datasetName,
 		MountPath:  mountPath,

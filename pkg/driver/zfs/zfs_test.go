@@ -245,6 +245,20 @@ func TestZFSReconcileQuota(t *testing.T) {
 		assert.Len(t, exec.commands, 1, "only the quota get should have run")
 	})
 
+	t.Run("no-op within rounding tolerance", func(t *testing.T) {
+		exec := newRecordExecutor()
+		// zfs truncates fractional sizes; Kubernetes quantity parsing rounds
+		// them up — a 1-byte difference must not plan a change.
+		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("2254857830\n")
+
+		d := New(WithExecutor(exec))
+		desired := int64(2254857831)
+		changes, err := d.ReconcileQuota(context.Background(), "tank/k8s/pvc", &desired, false)
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+		assert.Len(t, exec.commands, 1, "only the quota get should have run")
+	})
+
 	t.Run("unsets quota when nil and quota exists", func(t *testing.T) {
 		exec := newRecordExecutor()
 		exec.responses["zfs get -H -p -o value quota tank/k8s/pvc"] = []byte("10737418240\n")
