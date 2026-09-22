@@ -17,7 +17,8 @@ const (
 	AnnAdoptExisting        = "subvol.io/adopt-existing"         // "true" to adopt an already-existing dataset without mutation
 	AnnQuota                = "subvol.io/quota"                  // Live quota override, e.g. "10Gi" or "none"; overrides requests.storage unless it is the dummy value 1
 	AnnProperties           = "subvol.io/properties"             // Live filesystem property overrides (multi-line key=val), overlaid on top of StorageClass properties
-	AnnDryRun               = "subvol.io/dry-run"                // "true" to compute the planned changes for this volume without applying them
+	AnnDryRun               = "subvol.io/dry-run"                // "true" to force dry-run (plan only) even when apply is otherwise authorized
+	AnnApply                = "subvol.io/apply"                  // "true" to authorize applying the pending plan for this volume; removed by the provisioner after applying (one-shot)
 	AnnSelectedNode         = "volume.kubernetes.io/selected-node"
 
 	// PV Annotations / Labels added by provisioner
@@ -34,6 +35,7 @@ const (
 	ParamPathTemplate      = "pathTemplate"      // Path template, default: "{{ .Namespace }}/{{ .PVC }}"
 	ParamDefaultOwner      = "defaultOwner"      // Default "UID:GID" if not specified on PVC
 	ParamDefaultMode       = "defaultMode"       // Default permission bits e.g. "0750"
+	ParamAutoApply         = "autoApply"         // "true" to apply annotation-driven reconcile changes immediately instead of planning them (VolumeDryRun events) until subvol.io/apply is set
 	ParamProperties        = "properties"        // Multi-line key=val or YAML of filesystem properties (e.g. compression, atime)
 	ParamEncryption        = "encryption"        // Multi-line key=val or YAML of encryption settings (keyformat, keylocation)
 	ParamKeyLocationSecret = "keylocationSecret" // K8s secret ref "namespace/name#key" containing the keylocation URL

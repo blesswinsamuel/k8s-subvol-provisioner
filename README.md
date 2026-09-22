@@ -83,8 +83,17 @@ When a `PersistentVolumeClaim` is submitted:
 > *increasing* a bound PVC's storage, and the in-tree `local` volume plugin
 > used by this provisioner does not support volume expansion at all. This
 > provisioner therefore reconciles quota/config changes itself by watching
-> bound PVCs each resync cycle (`--resync-period`, default 15s) and applying
-> changes directly to the dataset.
+> bound PVCs each resync cycle (`--resync-period`, default 15s).
+>
+> **Plan by default.** Changes are never applied blindly: each resync, the
+> provisioner computes the delta and emits a `VolumeDryRun` event on the PVC.
+> Changes are applied only when authorized — either the PVC carries the
+> one-shot `subvol.io/apply: "true"` annotation (the provisioner removes it
+> after applying, so the volume is ready for the next change), or the
+> StorageClass sets the `autoApply: "true"` parameter. The
+> `subvol.io/dry-run: "true"` annotation always forces plan-only. Initial
+> provisioning (creating the volume for a new PVC) is never gated by this
+> policy.
 
 Reconciled per bound PVC of this provisioner (ZFS driver):
 
@@ -107,8 +116,10 @@ Notes:
   `nbmand`, `snapdir`, `acltype`, `aclinherit`, `dedup`, `checksum`,
   `copies`) plus user properties (`namespace:prop`). Create-time-only
   properties (`casesensitivity`, `refquota`, `reservation`, …) are ignored.
-- Dry run: annotate the PVC with `subvol.io/dry-run: "true"`, inspect the
-  `VolumeDryRun` event, then remove the annotation to apply.
+- Dry run / apply: annotate the PVC with `subvol.io/apply: "true"` to authorize
+  the pending plan (one-shot; removed after applying), or set `autoApply: "true"`
+  on the StorageClass to always apply immediately. `subvol.io/dry-run: "true"`
+  forces plan-only regardless.
 
 ---
 

@@ -367,12 +367,12 @@ func TestControllerExistingNoAdopt(t *testing.T) {
 	}
 }
 
-func TestControllerReconcileVolumeState(t *testing.T) {
+func TestControllerReconcileVolumeStatePlanByDefault(t *testing.T) {
 	ctx := context.Background()
 	mockDriver := mock.New()
 
 	sc := &storagev1.StorageClass{
-		ObjectMeta: metav1.ObjectMeta{Name: "zfs-mock"},
+		ObjectMeta:  metav1.ObjectMeta{Name: "zfs-mock"},
 		Provisioner: "subvol.io/provisioner",
 		Parameters: map[string]string{
 			config.ParamDriver:      "mock",
@@ -455,7 +455,7 @@ func TestControllerReconcileVolumeState(t *testing.T) {
 	require.NotNil(t, quotaCall, "expected a quota reconcile call")
 	assert.Equal(t, "pool/k8s/media/media-claim", quotaCall.Name)
 	assert.Equal(t, int64(20*1024*1024*1024), *quotaCall.Quota)
-	assert.False(t, quotaCall.DryRun)
+	assert.True(t, quotaCall.DryRun, "changes must be planned, not applied, without authorization")
 
 	require.NotNil(t, propsCall, "expected a properties reconcile call")
 	// StorageClass base + PVC overlay.
@@ -464,7 +464,171 @@ func TestControllerReconcileVolumeState(t *testing.T) {
 		"recordsize":  "1M",
 	}, propsCall.Props)
 
-	// A VolumeUpdated event must have been emitted.
+	// A VolumeDryRun event must have been emitted; the dataset stays untouched.
+	found := false
+	for {
+		select {
+		case event := <-recorder.Events:
+			if strings.Contains(event, "VolumeDryRun") {
+				found = true
+			}
+		default:
+			assert.True(t, found, "expected a VolumeDryRun event")
+			return
+		}
+	}
+}
+
+func TestControllerReconcileVolumeStateAutoApply(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: "zfs-mock"},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver:    "mock",
+			config.ParamNode:      "nas-pc",
+			config.ParamAutoApply: "true",
+		},
+	}
+
+	scName := "zfs-mock"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "media-claim",
+			Namespace: "media",
+			UID:       "aaa-bbb-ccc",
+			Annotations: map[string]string{
+				config.AnnQuota: "20Gi",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			VolumeName:       "pvc-aaa-bbb-ccc",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimBound,
+		},
+	}
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pvc-aaa-bbb-ccc",
+			Annotations: map[string]string{
+				config.AnnProvisionedBy: "subvol.io/provisioner",
+				config.AnnSubvolDriver:  "mock",
+				config.AnnDatasetName:   "pool/k8s/media/media-claim",
+			},
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc, pv)
+	recorder := record.NewFakeRecorder(10)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+		Recorder: recorder,
+	})
+	require.NoError(t, err)
+
+	ctrl.reconcileVolumeStates(ctx)
+
+	calls := mockDriver.GetReconcileCalls()
+	require.Len(t, calls, 3, "expected quota, owner/mode and properties reconcile calls")
+	for _, call := range calls {
+		assert.False(t, call.DryRun, "autoApply must apply changes for real")
+	}
+
+	found := false
+	for {
+		select {
+		case event := <-recorder.Events:
+			if strings.Contains(event, "VolumeUpdated") {
+				found = true
+			}
+		default:
+			assert.True(t, found, "expected a VolumeUpdated event")
+			return
+		}
+	}
+}
+
+func TestControllerReconcileVolumeStateApplyAnnotation(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	scName := "zfs-mock"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "media-claim",
+			Namespace: "media",
+			UID:       "aaa-bbb-ccc",
+			Annotations: map[string]string{
+				config.AnnQuota: "20Gi",
+				config.AnnApply: "true",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			VolumeName:       "pvc-aaa-bbb-ccc",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pvc-aaa-bbb-ccc",
+			Annotations: map[string]string{
+				config.AnnProvisionedBy: "subvol.io/provisioner",
+				config.AnnSubvolDriver:  "mock",
+				config.AnnDatasetName:   "pool/k8s/media/media-claim",
+			},
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: "zfs-mock"},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver: "mock",
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc, pv)
+	recorder := record.NewFakeRecorder(10)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+		Recorder: recorder,
+	})
+	require.NoError(t, err)
+
+	ctrl.reconcileVolumeStates(ctx)
+
+	calls := mockDriver.GetReconcileCalls()
+	require.Len(t, calls, 3, "expected quota, owner/mode and properties reconcile calls")
+	for _, call := range calls {
+		assert.False(t, call.DryRun, "apply annotation must authorize real changes")
+	}
+
+	// The one-shot apply annotation must be removed after applying.
+	updated, err := client.CoreV1().PersistentVolumeClaims("media").Get(ctx, "media-claim", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, updated.Annotations, config.AnnApply, "apply annotation must be removed after applying")
+
 	found := false
 	for {
 		select {

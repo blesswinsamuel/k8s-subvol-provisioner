@@ -14,9 +14,10 @@ import (
 	"github.com/rs/zerolog/log"
 	corev1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/record"
 )
@@ -524,6 +525,13 @@ func resolveQuota(pvc *corev1.PersistentVolumeClaim) (*int64, error) {
 
 // reconcileVolumeStates reconciles annotation-driven config (quota, owner,
 // mode, properties) onto the backend datasets of already-bound PVCs.
+//
+// By default changes are only *planned*: the controller computes the delta and
+// emits a VolumeDryRun event without touching the dataset. Changes are applied
+// only when the StorageClass opts in via the `autoApply` parameter, or the PVC
+// carries a one-shot subvol.io/apply annotation (removed after applying). The
+// subvol.io/dry-run annotation always forces plan-only. Initial provisioning
+// (creating a volume for a new PVC) is never gated by this policy.
 func (c *Controller) reconcileVolumeStates(ctx context.Context) {
 	pvcs, err := c.client.CoreV1().PersistentVolumeClaims("").List(ctx, metav1.ListOptions{})
 	if err != nil {
@@ -581,7 +589,21 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 		return
 	}
 	mountPath := pv.Annotations[config.AnnHostMountPath]
+
+	// Apply policy: plan-only by default; apply when the StorageClass sets
+	// autoApply or the PVC carries the one-shot subvol.io/apply annotation.
+	// subvol.io/dry-run always forces plan-only.
+	var sc *storagev1.StorageClass
+	if scName := pvc.Spec.StorageClassName; scName != nil && *scName != "" {
+		if got, err := c.client.StorageV1().StorageClasses().Get(ctx, *scName, metav1.GetOptions{}); err == nil {
+			sc = got
+		}
+	}
+	applyRequested := pvc.Annotations[config.AnnApply] == "true"
 	dryRun := pvc.Annotations[config.AnnDryRun] == "true"
+	autoApply := sc != nil && sc.Parameters[config.ParamAutoApply] == "true"
+	apply := (autoApply || applyRequested) && !dryRun
+	runDryRun := !apply
 
 	var changes []string
 	fail := func(err error, what string) {
@@ -595,7 +617,7 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 		fail(err, "resolve quota")
 		return
 	}
-	qc, err := rec.ReconcileQuota(ctx, datasetName, quota, dryRun)
+	qc, err := rec.ReconcileQuota(ctx, datasetName, quota, runDryRun)
 	if err != nil {
 		fail(err, "quota")
 	} else {
@@ -605,27 +627,26 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 	// Owner/mode: PVC annotation -> StorageClass default.
 	var owner *config.Ownership
 	var mode *os.FileMode
-	if scName := pvc.Spec.StorageClassName; scName != nil && *scName != "" {
-		if sc, err := c.client.StorageV1().StorageClasses().Get(ctx, *scName, metav1.GetOptions{}); err == nil {
-			ownerStr := pvc.Annotations[config.AnnOwner]
-			if ownerStr == "" {
-				ownerStr = sc.Parameters[config.ParamDefaultOwner]
-			}
-			owner, _ = config.ParseOwnership(ownerStr)
-			modeStr := pvc.Annotations[config.AnnMode]
-			if modeStr == "" {
-				modeStr = sc.Parameters[config.ParamDefaultMode]
-			}
-			mode, _ = config.ParseFileMode(modeStr)
-		}
+	var ownerStr, modeStr string
+	if sc != nil {
+		ownerStr = sc.Parameters[config.ParamDefaultOwner]
+		modeStr = sc.Parameters[config.ParamDefaultMode]
 	}
+	if s := pvc.Annotations[config.AnnOwner]; s != "" {
+		ownerStr = s
+	}
+	if s := pvc.Annotations[config.AnnMode]; s != "" {
+		modeStr = s
+	}
+	owner, _ = config.ParseOwnership(ownerStr)
+	mode, _ = config.ParseFileMode(modeStr)
 	oc, err := rec.ReconcileOwnerMode(ctx, driver.OwnerModeOptions{
 		Name:       datasetName,
 		MountPath:  mountPath,
 		HostPrefix: c.hostPrefix,
 		Owner:      owner,
 		Mode:       mode,
-		DryRun:     dryRun,
+		DryRun:     runDryRun,
 	})
 	if err != nil {
 		fail(err, "owner/mode")
@@ -635,17 +656,15 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 
 	// Properties: StorageClass base, overlaid by the PVC annotation.
 	props := map[string]string{}
-	if scName := pvc.Spec.StorageClassName; scName != nil && *scName != "" {
-		if sc, err := c.client.StorageV1().StorageClasses().Get(ctx, *scName, metav1.GetOptions{}); err == nil {
-			for k, v := range config.ParseKeyValueLines(sc.Parameters[config.ParamProperties]) {
-				props[k] = v
-			}
+	if sc != nil {
+		for k, v := range config.ParseKeyValueLines(sc.Parameters[config.ParamProperties]) {
+			props[k] = v
 		}
 	}
 	for k, v := range config.ParseKeyValueLines(pvc.Annotations[config.AnnProperties]) {
 		props[k] = v
 	}
-	pc, err := rec.ReconcileProperties(ctx, datasetName, props, dryRun)
+	pc, err := rec.ReconcileProperties(ctx, datasetName, props, runDryRun)
 	if err != nil {
 		fail(err, "properties")
 	} else {
@@ -656,11 +675,22 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 		return
 	}
 	summary := strings.Join(changes, ", ")
-	if dryRun {
-		log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("DRY RUN: planned volume changes")
-		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeDryRun", fmt.Sprintf("Dry run: would apply: %s", summary))
-	} else {
-		log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("Reconciled volume state")
-		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeUpdated", fmt.Sprintf("Applied: %s", summary))
+	if !apply {
+		log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("DRY RUN: planned volume changes (annotate with subvol.io/apply to authorize)")
+		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeDryRun", fmt.Sprintf("Dry run: would apply: %s (annotate with %s to apply)", summary, config.AnnApply))
+		return
+	}
+	log.Info().Str("pvc", pvc.Name).Str("dataset", datasetName).Str("changes", summary).Msg("Reconciled volume state")
+	c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeUpdated", fmt.Sprintf("Applied: %s", summary))
+
+	// One-shot semantics: the apply annotation authorizes exactly one apply pass.
+	// Remove it so the volume is ready for the next change and the annotation
+	// never lingers as drift against the declarative rendered state.
+	if applyRequested {
+		patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, config.AnnApply)
+		if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Patch(ctx, pvc.Name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+			log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to remove apply annotation")
+			c.emitEvent(pvc, corev1.EventTypeWarning, "ApplyAnnotationCleanupFailed", fmt.Sprintf("Applied changes but failed to remove %s annotation: %v", config.AnnApply, err))
+		}
 	}
 }
