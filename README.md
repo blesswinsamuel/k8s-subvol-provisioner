@@ -71,7 +71,7 @@ When a `PersistentVolumeClaim` is submitted:
 | `subvol.io/secret-key-ref` | Reference to a Kubernetes secret containing the key (`namespace/secret#key`). |
 | `subvol.io/snapshot-before-delete` | When set to `"true"` and reclaim policy is `Delete`, preserves the volume's data before deletion: ZFS and the directory backend rename the dataset/directory to a sibling `<name>-deleted-<timestamp>`, Btrfs creates a read-only sibling snapshot. If preservation fails, deletion proceeds. |
 | `subvol.io/adopt-existing` | When set to `"true"`, adopts an already-existing dataset/subvolume as-is (no create, quota, ownership, or property mutations) and binds a new PV to it. Without this annotation, an existing dataset is an error. |
-| `subvol.io/quota` | Live quota override, e.g. `10Gi`. Accepts `none`/`unlimited` to remove the quota. Reconciled on every sync (grow **and** shrink). See [Live Volume Reconcile](#live-volume-reconcile). |
+| `subvol.io/quota` | Live quota override, e.g. `10Gi`, an exact byte count (`2254857830`), or `none`/`unlimited` to remove the quota. Byte counts compare exactly — renderers should emit zfs-truncated bytes so fractional sizes never drift. Reconciled on every sync (grow **and** shrink). See [Live Volume Reconcile](#live-volume-reconcile). |
 | `subvol.io/properties` | Live filesystem property overrides (multi-line key=val), overlaid on top of the StorageClass `properties`. Removed keys fall back to the StorageClass value. |
 | `subvol.io/dry-run` | When set to `"true"`, the reconcile pass computes the planned changes for this volume (quota, ownership, mode, properties) but does not apply them; the plan is logged and emitted as a `VolumeDryRun` event. |
 
