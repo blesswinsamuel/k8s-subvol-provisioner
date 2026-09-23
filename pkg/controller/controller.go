@@ -724,8 +724,13 @@ func (c *Controller) reconcileVolumeDelete(ctx context.Context, pv *corev1.Persi
 		return err
 	}
 
-	// Delete the PV from Kubernetes
+	// Delete the PV from Kubernetes. A NotFound means a concurrent reconcile
+	// already deleted it, which is a successful outcome for this reconcile.
 	if err := c.client.CoreV1().PersistentVolumes().Delete(ctx, pv.Name, metav1.DeleteOptions{}); err != nil {
+		if apierrors.IsNotFound(err) {
+			log.Info().Str("pv", pv.Name).Msg("PV object already deleted from K8s")
+			return nil
+		}
 		log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to delete PV object from K8s")
 		c.emitEvent(pv, corev1.EventTypeWarning, "PVDeleteFailed", err.Error())
 		return err

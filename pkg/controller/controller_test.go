@@ -272,6 +272,52 @@ func TestControllerDeleteReleasedPV(t *testing.T) {
 	assert.Empty(t, pvs.Items)
 }
 
+func TestControllerDeletePVAlreadyGone(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	// Dataset backend still exists in the mock driver, but the PV is already
+	// gone from the API — simulate a stale-cache delete re-run where a
+	// concurrent reconcile already deleted the PV.
+	_, err := mockDriver.Create(ctx, driver.CreateOptions{
+		Name: "tank/k8s/default/gone-pvc",
+	})
+	require.NoError(t, err)
+
+	deletePolicy := corev1.PersistentVolumeReclaimDelete
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pvc-gone-123",
+			Annotations: map[string]string{
+				config.AnnProvisionedBy: config.DefaultProvisionerName,
+				config.AnnSubvolDriver:  "mock",
+				config.AnnDatasetName:   "tank/k8s/default/gone-pvc",
+			},
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeReclaimPolicy: deletePolicy,
+		},
+		Status: corev1.PersistentVolumeStatus{
+			Phase: corev1.VolumeReleased,
+		},
+	}
+
+	// PV does not exist in the API — simulate a stale-cache delete re-run.
+	client := fake.NewSimpleClientset()
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:   client,
+		NodeName: "nas-pc",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+	})
+	require.NoError(t, err)
+
+	err = ctrl.reconcileVolumeDelete(ctx, pv)
+	assert.NoError(t, err)
+}
+
 func TestControllerAdoptExisting(t *testing.T) {
 	ctx := context.Background()
 	mockDriver := mock.New()
