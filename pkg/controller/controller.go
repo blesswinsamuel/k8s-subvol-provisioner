@@ -872,6 +872,21 @@ func (c *Controller) reconcileVolumeState(ctx context.Context, pvc *corev1.Persi
 	}
 
 	if len(changes) == 0 {
+		// No drift: emit VolumeUpToDate so consumers (e.g. the kubeploy UI)
+		// can retire a previously pending VolumeDryRun plan that is no longer
+		// applicable — events are append-only and cannot be retracted.
+		log.Debug().Str("pvc", pvc.Name).Str("dataset", datasetName).Msg("Volume state is up to date")
+		c.emitEvent(pvc, corev1.EventTypeNormal, "VolumeUpToDate", "No pending changes: dataset matches the desired configuration")
+		if applyRequested {
+			// The authorized apply found nothing to do; still consume the
+			// one-shot annotation so it never lingers as drift.
+			patch := fmt.Sprintf(`{"metadata":{"annotations":{%q:null}}}`, config.AnnApply)
+			if _, err := c.client.CoreV1().PersistentVolumeClaims(pvc.Namespace).Patch(ctx, pvc.Name, types.StrategicMergePatchType, []byte(patch), metav1.PatchOptions{}); err != nil {
+				log.Error().Err(err).Str("pvc", pvc.Name).Msg("Failed to remove apply annotation")
+				c.emitEvent(pvc, corev1.EventTypeWarning, "ApplyAnnotationCleanupFailed", fmt.Sprintf("No changes to apply but failed to remove %s annotation: %v", config.AnnApply, err))
+				return err
+			}
+		}
 		return nil
 	}
 	summary := strings.Join(changes, ", ")

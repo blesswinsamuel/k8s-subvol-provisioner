@@ -11,11 +11,12 @@ import (
 
 // Driver is a mock implementation of driver.Driver for testing.
 type Driver struct {
-	mu      sync.RWMutex
-	volumes map[string]*driver.VolumeInfo
-	options map[string]driver.CreateOptions
-	deleted map[string]driver.DeleteOptions
+	mu         sync.RWMutex
+	volumes    map[string]*driver.VolumeInfo
+	options    map[string]driver.CreateOptions
+	deleted    map[string]driver.DeleteOptions
 	reconciles []ReconcileCall
+	upToDate   bool
 }
 
 // ReconcileCall records a single reconcile invocation.
@@ -116,10 +117,21 @@ func (m *Driver) GetCreateOptions(name string) (driver.CreateOptions, bool) {
 	return opt, ok
 }
 
+// SetUpToDate makes the reconcile methods report no pending changes, modeling
+// a dataset that already matches the desired configuration.
+func (m *Driver) SetUpToDate(upToDate bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.upToDate = upToDate
+}
+
 func (m *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reconciles = append(m.reconciles, ReconcileCall{Name: name, Quota: quotaBytes, DryRun: dryRun})
+	if m.upToDate {
+		return nil, nil
+	}
 	if quotaBytes == nil {
 		return []string{"quota=none"}, nil
 	}
@@ -130,6 +142,9 @@ func (m *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOp
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reconciles = append(m.reconciles, ReconcileCall{Name: opts.Name, Owner: &opts, DryRun: opts.DryRun})
+	if m.upToDate {
+		return nil, nil
+	}
 	if opts.Owner == nil && opts.Mode == nil {
 		return nil, nil
 	}
@@ -140,6 +155,9 @@ func (m *Driver) ReconcileProperties(ctx context.Context, name string, props map
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.reconciles = append(m.reconciles, ReconcileCall{Name: name, Props: props, DryRun: dryRun})
+	if m.upToDate {
+		return nil, nil
+	}
 	if len(props) == 0 {
 		return nil, nil
 	}

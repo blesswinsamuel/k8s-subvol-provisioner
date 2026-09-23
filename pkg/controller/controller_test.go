@@ -714,6 +714,89 @@ func TestControllerReconcileVolumeStateDryRun(t *testing.T) {
 	}
 }
 
+func TestControllerReconcileVolumeStateUpToDate(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+	// The dataset already matches the desired configuration (e.g. the config
+	// was reverted after a dry run), so any previously pending plan is moot.
+	mockDriver.SetUpToDate(true)
+
+	scName := "zfs-mock"
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "media-claim",
+			Namespace: "media",
+			UID:       "ggg-hhh-iii",
+			Annotations: map[string]string{
+				config.AnnQuota: "20Gi",
+				// A leftover one-shot apply annotation must still be consumed.
+				config.AnnApply: "true",
+			},
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			VolumeName:       "pvc-ggg-hhh-iii",
+		},
+		Status: corev1.PersistentVolumeClaimStatus{Phase: corev1.ClaimBound},
+	}
+
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pvc-ggg-hhh-iii",
+			Annotations: map[string]string{
+				config.AnnProvisionedBy: "subvol.io/provisioner",
+				config.AnnSubvolDriver:  "mock",
+				config.AnnDatasetName:   "pool/k8s/media/media-claim",
+			},
+		},
+		Status: corev1.PersistentVolumeStatus{Phase: corev1.VolumeBound},
+	}
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta:  metav1.ObjectMeta{Name: "zfs-mock"},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver: "mock",
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc, pv)
+	recorder := record.NewFakeRecorder(10)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+		Recorder: recorder,
+	})
+	require.NoError(t, err)
+
+	ctrl.processPVC(ctx, pvc)
+
+	// The one-shot apply annotation must be consumed even when there is
+	// nothing to apply, so it never lingers as drift.
+	updated, err := client.CoreV1().PersistentVolumeClaims("media").Get(ctx, "media-claim", metav1.GetOptions{})
+	require.NoError(t, err)
+	assert.NotContains(t, updated.Annotations, config.AnnApply, "apply annotation must be removed when no changes are pending")
+
+	upToDate := false
+	for {
+		select {
+		case event := <-recorder.Events:
+			assert.NotContains(t, event, "VolumeDryRun", "no plan may be emitted when the dataset matches the desired config")
+			if strings.Contains(event, "VolumeUpToDate") {
+				upToDate = true
+			}
+		default:
+			assert.True(t, upToDate, "expected a VolumeUpToDate event")
+			return
+		}
+	}
+}
+
 func TestControllerKeyLocationSecret(t *testing.T) {
 	ctx := context.Background()
 	mockDriver := mock.New()
