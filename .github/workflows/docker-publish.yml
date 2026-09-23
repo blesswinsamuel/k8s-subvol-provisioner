@@ -59,4 +59,4 @@ jobs:
           build-args: |
             VERSION=${{ steps.meta.outputs.version }}
             COMMIT=${{ github.sha }}
-            DATE=${{ steps.meta.outputs.bake-target }}
+            DATE=${{ github.event.head_commit.timestamp }}

@@ -1,5 +1,5 @@
 # Build stage
-FROM golang:bookworm AS builder
+FROM --platform=$BUILDPLATFORM golang:bookworm AS builder
 
 WORKDIR /src
 
