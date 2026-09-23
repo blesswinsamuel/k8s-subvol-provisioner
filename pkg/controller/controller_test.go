@@ -869,3 +869,60 @@ func TestControllerKeyLocationSecret(t *testing.T) {
 	assert.Equal(t, "http://keys.home.lan:8080/token/pool", opts.Encryption.KeyLocation)
 	assert.Empty(t, opts.Encryption.KeyData, "keylocation secret must not be passed as raw key data")
 }
+
+func TestControllerBlockModeRejected(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "zfs-mock",
+		},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver:       "mock",
+			config.ParamMountPrefix:  "/mnt/pool/k8s",
+			config.ParamPathTemplate: "{{ .Namespace }}/{{ .PVC }}",
+			config.ParamNode:         "nas-pc",
+		},
+	}
+
+	scName := "zfs-mock"
+	blockMode := corev1.PersistentVolumeBlock
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "block-claim",
+			Namespace: "media",
+			UID:       "block-uid",
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+			VolumeMode:       &blockMode,
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:          client,
+		NodeName:        "nas-pc",
+		ProvisionerName: "subvol.io/provisioner",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+	})
+	require.NoError(t, err)
+
+	err = ctrl.processPVC(ctx, pvc)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "raw block volume mode is not supported")
+
+	// No volume provisioned, no PV created
+	assert.Nil(t, mockDriver.GetVolume("pool/k8s/media/block-claim"))
+	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	assert.Empty(t, pvs.Items)
+}

@@ -39,6 +39,10 @@ func (d *Driver) Exists(ctx context.Context, path string) (bool, error) {
 }
 
 func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver.VolumeInfo, error) {
+	if opts.QuotaBytes > 0 {
+		return nil, fmt.Errorf("dir driver does not support quotas (quota=%d bytes requested); use the zfs or btrfs driver for quota enforcement", opts.QuotaBytes)
+	}
+
 	targetPath := opts.MountPath
 	if targetPath == "" {
 		targetPath = opts.Name
@@ -95,6 +99,41 @@ func (d *Driver) Create(ctx context.Context, opts driver.CreateOptions) (*driver
 		Name:      opts.Name,
 		MountPath: targetPath,
 	}, nil
+}
+
+// ReconcileQuota fails loudly when a quota is requested: plain host
+// directories have no quota mechanism. A nil quota (no quota requested) is a
+// no-op.
+func (d *Driver) ReconcileQuota(ctx context.Context, name string, quotaBytes *int64, dryRun bool) ([]string, error) {
+	if quotaBytes == nil {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("dir driver does not support quotas (quota=%d bytes requested on %q); use the zfs or btrfs driver for quota enforcement", *quotaBytes, name)
+}
+
+// ReconcileOwnerMode applies the declared owner and/or mode to the volume
+// directory; when neither is declared nothing is touched.
+func (d *Driver) ReconcileOwnerMode(ctx context.Context, opts driver.OwnerModeOptions) ([]string, error) {
+	if opts.Owner == nil && opts.Mode == nil {
+		return nil, nil
+	}
+	if opts.MountPath == "" {
+		return nil, nil
+	}
+	path := opts.MountPath
+	if opts.HostPrefix != "" {
+		path = filepath.Join(opts.HostPrefix, path)
+	}
+	return driver.ReconcileOwnerModeAtPath(path, opts)
+}
+
+// ReconcileProperties fails loudly when properties are requested: plain host
+// directories have no properties. No properties requested is a no-op.
+func (d *Driver) ReconcileProperties(ctx context.Context, name string, props map[string]string, dryRun bool) ([]string, error) {
+	if len(props) == 0 {
+		return nil, nil
+	}
+	return nil, fmt.Errorf("dir driver does not support properties (%d requested on %q)", len(props), name)
 }
 
 func (d *Driver) Delete(ctx context.Context, opts driver.DeleteOptions) error {

@@ -442,6 +442,12 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		return fmt.Errorf("storage driver %q is not registered", driverName)
 	}
 
+	if pvc.Spec.VolumeMode != nil && *pvc.Spec.VolumeMode == corev1.PersistentVolumeBlock {
+		log.Error().Str("pvc", pvc.Name).Msg("Raw block volume mode is not supported")
+		c.emitEvent(pvc, corev1.EventTypeWarning, "VolumeModeUnsupported", "Raw block volumes are not supported by this provisioner; use a filesystem-mode PVC")
+		return fmt.Errorf("raw block volume mode is not supported for PVC %s/%s", pvc.Namespace, pvc.Name)
+	}
+
 	// Calculate subvolume/dataset path
 	relPath := pvc.Annotations[config.AnnSubvolPath]
 	if relPath == "" {

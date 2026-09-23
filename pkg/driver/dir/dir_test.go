@@ -163,3 +163,131 @@ func TestDirDeleteNonExistent(t *testing.T) {
 
 	require.NoError(t, err)
 }
+
+func TestDirCreateQuotaRejected(t *testing.T) {
+	tempDir := t.TempDir()
+
+	d := New()
+	info, err := d.Create(context.Background(), driver.CreateOptions{
+		Name:       "ns1/pvc1",
+		MountPath:  filepath.Join(tempDir, "ns1", "pvc1"),
+		QuotaBytes: 2 * 1024 * 1024 * 1024,
+	})
+
+	require.Error(t, err)
+	assert.Nil(t, info)
+	assert.Contains(t, err.Error(), "does not support quotas")
+}
+
+func TestDirReconcileQuota(t *testing.T) {
+	d := New()
+
+	t.Run("nil quota is a no-op", func(t *testing.T) {
+		changes, err := d.ReconcileQuota(context.Background(), "ns1/pvc1", nil, false)
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+
+	t.Run("requested quota fails loudly", func(t *testing.T) {
+		quota := int64(2 * 1024 * 1024 * 1024)
+		_, err := d.ReconcileQuota(context.Background(), "ns1/pvc1", &quota, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support quotas")
+	})
+}
+
+func TestDirReconcileOwnerMode(t *testing.T) {
+	dir := t.TempDir()
+	require.NoError(t, os.Chmod(dir, 0755))
+
+	t.Run("skips when nothing declared", func(t *testing.T) {
+		d := New()
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "ns1/pvc1",
+			MountPath: dir,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+		assert.NoFileExists(t, filepath.Join(dir, "untouched-marker"))
+	})
+
+	t.Run("changes mode and reports change", func(t *testing.T) {
+		d := New()
+		mode := os.FileMode(0750)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "ns1/pvc1",
+			MountPath: dir,
+			Mode:      &mode,
+		})
+		require.NoError(t, err)
+		assert.Equal(t, []string{"mode=0755→0750"}, changes)
+
+		fi, err := os.Stat(dir)
+		require.NoError(t, err)
+		assert.Equal(t, os.FileMode(0750), fi.Mode().Perm())
+	})
+
+	t.Run("skips when already matching", func(t *testing.T) {
+		d := New()
+		mode := os.FileMode(0750)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "ns1/pvc1",
+			MountPath: dir,
+			Mode:      &mode,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+
+	t.Run("recursive applies to nested paths", func(t *testing.T) {
+		sub := filepath.Join(dir, "sub")
+		require.NoError(t, os.Mkdir(sub, 0755))
+		file := filepath.Join(sub, "data.txt")
+		require.NoError(t, os.WriteFile(file, []byte("x"), 0644))
+
+		d := New()
+		mode := os.FileMode(0770)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "ns1/pvc1",
+			MountPath: dir,
+			Mode:      &mode,
+			Recursive: true,
+		})
+		require.NoError(t, err)
+		assert.ElementsMatch(t, []string{"mode=0750→0770", "mode recursive: 2 paths"}, changes)
+
+		for _, p := range []string{sub, file} {
+			fi, err := os.Stat(p)
+			require.NoError(t, err)
+			assert.Equal(t, os.FileMode(0770), fi.Mode().Perm(), "path %s must be re-chmodded", p)
+		}
+	})
+
+	t.Run("missing directory is skipped", func(t *testing.T) {
+		d := New()
+		mode := os.FileMode(0750)
+		changes, err := d.ReconcileOwnerMode(context.Background(), driver.OwnerModeOptions{
+			Name:      "ns1/pvc1",
+			MountPath: filepath.Join(dir, "does-not-exist"),
+			Mode:      &mode,
+		})
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+}
+
+func TestDirReconcileProperties(t *testing.T) {
+	d := New()
+
+	t.Run("no properties is a no-op", func(t *testing.T) {
+		changes, err := d.ReconcileProperties(context.Background(), "ns1/pvc1", nil, false)
+		require.NoError(t, err)
+		assert.Empty(t, changes)
+	})
+
+	t.Run("requested properties fail loudly", func(t *testing.T) {
+		_, err := d.ReconcileProperties(context.Background(), "ns1/pvc1", map[string]string{"compression": "on"}, false)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "does not support properties")
+	})
+}
