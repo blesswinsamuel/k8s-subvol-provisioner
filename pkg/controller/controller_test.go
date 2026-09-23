@@ -14,6 +14,7 @@ import (
 	storagev1 "k8s.io/api/storage/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes/fake"
 	"k8s.io/client-go/tools/record"
 )
@@ -86,6 +87,72 @@ func TestControllerProvisioning(t *testing.T) {
 	assert.Equal(t, "pvc-111-222-333", pv.Name)
 	assert.Equal(t, "/mnt/pool/k8s/media/media-claim", pv.Spec.Local.Path)
 	assert.Equal(t, "subvol.io/provisioner", pv.Annotations[config.AnnProvisionedBy])
+}
+
+func TestControllerSkipReprovisionWhenPVExists(t *testing.T) {
+	ctx := context.Background()
+	mockDriver := mock.New()
+
+	sc := &storagev1.StorageClass{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "zfs-mock",
+		},
+		Provisioner: "subvol.io/provisioner",
+		Parameters: map[string]string{
+			config.ParamDriver: "mock",
+			config.ParamNode:   "nas-pc",
+		},
+	}
+
+	scName := "zfs-mock"
+	pvcUID := types.UID("777-888-999")
+	pvc := &corev1.PersistentVolumeClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-claim",
+			Namespace: "default",
+			UID:       pvcUID,
+		},
+		Spec: corev1.PersistentVolumeClaimSpec{
+			StorageClassName: &scName,
+		},
+		Status: corev1.PersistentVolumeClaimStatus{
+			Phase: corev1.ClaimPending,
+		},
+	}
+
+	existingPV := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "pvc-777-888-999",
+		},
+		Spec: corev1.PersistentVolumeSpec{
+			ClaimRef: &corev1.ObjectReference{
+				Kind:      "PersistentVolumeClaim",
+				Namespace: "default",
+				Name:      "existing-claim",
+				UID:       pvcUID,
+			},
+		},
+	}
+
+	client := fake.NewSimpleClientset(sc, pvc, existingPV)
+
+	ctrl, err := NewController(ControllerOptions{
+		Client:   client,
+		NodeName: "nas-pc",
+		Drivers: map[string]driver.Driver{
+			"mock": mockDriver,
+		},
+	})
+	require.NoError(t, err)
+
+	err = ctrl.processPVC(ctx, pvc)
+	require.NoError(t, err)
+
+	// Provisioning must be skipped: no new dataset and still exactly one PV.
+	assert.Nil(t, mockDriver.GetVolume("default/existing-claim"))
+	pvs, err := client.CoreV1().PersistentVolumes().List(ctx, metav1.ListOptions{})
+	require.NoError(t, err)
+	require.Len(t, pvs.Items, 1)
 }
 
 func TestControllerSkipOtherNode(t *testing.T) {

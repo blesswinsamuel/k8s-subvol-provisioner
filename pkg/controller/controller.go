@@ -430,6 +430,16 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 		c.mu.Unlock()
 	}()
 
+	// If a PV for this PVC already exists (e.g. a stale-cache re-run after a
+	// previous successful provision), skip provisioning entirely to keep this
+	// reconcile idempotent.
+	pvName := fmt.Sprintf("pvc-%s", pvc.UID)
+	if existingPV, err := c.getPV(ctx, pvName); err == nil &&
+		existingPV.Spec.ClaimRef != nil && existingPV.Spec.ClaimRef.UID == pvc.UID {
+		log.Info().Str("pvc", pvc.Name).Str("pv", pvName).Msg("PV already provisioned for PVC, skipping provisioning")
+		return nil
+	}
+
 	driverName := sc.Parameters[config.ParamDriver]
 	if driverName == "" {
 		driverName = "zfs" // default
@@ -600,9 +610,24 @@ func (c *Controller) reconcileClaim(ctx context.Context, pvc *corev1.PersistentV
 
 	createdPV, err := c.client.CoreV1().PersistentVolumes().Create(ctx, pv, metav1.CreateOptions{})
 	if err != nil {
-		log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to create PV in API")
-		c.emitEvent(pvc, corev1.EventTypeWarning, "PVCreateFailed", err.Error())
-		return err
+		// Another reconcile may have created the PV between our existence
+		// check and this Create. Treat it as success only if it belongs to
+		// this PVC.
+		if apierrors.IsAlreadyExists(err) {
+			existingPV, getErr := c.getPV(ctx, pv.Name)
+			if getErr == nil && existingPV.Spec.ClaimRef != nil && existingPV.Spec.ClaimRef.UID == pvc.UID {
+				log.Info().Str("pv", pv.Name).Str("pvc", pvc.Name).Msg("PV already created for PVC by concurrent reconcile")
+				createdPV = existingPV
+			} else {
+				log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to create PV in API")
+				c.emitEvent(pvc, corev1.EventTypeWarning, "PVCreateFailed", err.Error())
+				return err
+			}
+		} else {
+			log.Error().Err(err).Str("pv", pv.Name).Msg("Failed to create PV in API")
+			c.emitEvent(pvc, corev1.EventTypeWarning, "PVCreateFailed", err.Error())
+			return err
+		}
 	}
 
 	log.Info().Str("pv", createdPV.Name).Str("pvc", pvc.Name).Msg("Successfully provisioned and created PV")
